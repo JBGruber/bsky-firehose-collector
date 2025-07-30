@@ -7,18 +7,16 @@ if (exists("con")) {
 con <- DBI::dbConnect(
   RPostgres::Postgres(),
   dbname = "collector-db",
-  host = "localhost", #Sys.getenv("FEEDGEN_DB_HOST"), # "tux01ascor.fmg.uva.nl",#
+  host = "10.6.13.115",
   port = 5432,
   user = "collector",
   password = "collector"
 )
+
+# see which tables exist
 DBI::dbListTables(con)
 
 posts <- tbl(con, "post") |>
-  head(10000) |>
-  collect()
-
-follows <- tbl(con, "follows") |>
   head(10000) |>
   collect()
 
