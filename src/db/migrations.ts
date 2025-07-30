@@ -39,29 +39,11 @@ migrations['001'] = {
       .addColumn('createdAt', 'varchar', (col) => col.notNull())
       .addColumn('author', 'varchar', (col) => col.notNull())
       .execute()
-    await db.schema
-      .createTable('follows')
-      .addColumn('subject', 'varchar', (col) => col.notNull())
-      .addColumn('follows', 'varchar', (col) => col.notNull())
-      .addPrimaryKeyConstraint('follows_pk', ['subject', 'follows']) // Composite primary key
-      .execute()
+
     await db.schema
       .createTable('sub_state')
       .addColumn('service', 'varchar', (col) => col.primaryKey())
       .addColumn('cursor', 'bigint', (col) => col.notNull())
-      .execute()
-
-    // indexes should bring performance
-    await db.schema
-      .createIndex('post_author_index')
-      .on('post')
-      .column('author')
-      .execute()
-
-    await db.schema
-      .createIndex('follows_subject_index')
-      .on('follows')
-      .column('subject')
       .execute()
     
     await db.schema

@@ -5,7 +5,6 @@ import { ids, lexicons } from '../lexicon/lexicons'
 import { Record as PostRecord } from '../lexicon/types/app/bsky/feed/post'
 import { Record as RepostRecord } from '../lexicon/types/app/bsky/feed/repost'
 import { Record as LikeRecord } from '../lexicon/types/app/bsky/feed/like'
-import { Record as FollowRecord } from '../lexicon/types/app/bsky/graph/follow'
 import {
   Commit,
   OutputSchema as RepoEvent,
@@ -82,7 +81,6 @@ export const getOpsByType = async (evt: Commit): Promise<OperationsByType> => {
     posts: { creates: [], deletes: [] },
     reposts: { creates: [], deletes: [] },
     likes: { creates: [], deletes: [] },
-    follows: { creates: [], deletes: [] },
   }
 
   for (const op of evt.ops) {
@@ -103,8 +101,6 @@ export const getOpsByType = async (evt: Commit): Promise<OperationsByType> => {
         opsByType.reposts.creates.push({ record, ...create })
       } else if (collection === ids.AppBskyFeedLike && isLike(record)) {
         opsByType.likes.creates.push({ record, ...create })
-      } else if (collection === ids.AppBskyGraphFollow && isFollow(record)) {
-        opsByType.follows.creates.push({ record, ...create })
       }
     }
 
@@ -115,8 +111,6 @@ export const getOpsByType = async (evt: Commit): Promise<OperationsByType> => {
         opsByType.reposts.deletes.push({ uri })
       } else if (collection === ids.AppBskyFeedLike) {
         opsByType.likes.deletes.push({ uri })
-      } else if (collection === ids.AppBskyGraphFollow) {
-        opsByType.follows.deletes.push({ uri })
       }
     }
   }
@@ -128,7 +122,6 @@ type OperationsByType = {
   posts: Operations<PostRecord>
   reposts: Operations<RepostRecord>
   likes: Operations<LikeRecord>
-  follows: Operations<FollowRecord>
 }
 
 type Operations<T = Record<string, unknown>> = {
@@ -157,10 +150,6 @@ export const isRepost = (obj: unknown): obj is RepostRecord => {
 
 export const isLike = (obj: unknown): obj is LikeRecord => {
   return isType(obj, ids.AppBskyFeedLike)
-}
-
-export const isFollow = (obj: unknown): obj is FollowRecord => {
-  return isType(obj, ids.AppBskyGraphFollow)
 }
 
 const isType = (obj: unknown, nsid: string) => {

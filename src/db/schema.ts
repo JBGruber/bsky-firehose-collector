@@ -1,7 +1,6 @@
 export type DatabaseSchema = {
   post: Post
   engagement: Engagement
-  follows: Follows
   sub_state: SubState
 }
 
@@ -32,11 +31,6 @@ export type Engagement = {
   indexedAt: string
   createdAt: string
   author: string
-}
-
-export type Follows = {
-  subject: string
-  follows: string
 }
 
 export type SubState = {
