@@ -1,0 +1,61 @@
+services:
+  collector:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: collector
+    hostname: collector
+    restart: unless-stopped
+    logging:
+      options:
+        max-size: 10m
+    volumes:
+      - data:/app/data
+    environment:
+      NODE_ENV: production
+      COLLECTOR_SUBSCRIPTION_ENDPOINT: wss://bsky.network
+      COLLECTOR_SUBSCRIPTION_RECONNECT_DELAY: 3000
+      # Database connection details
+      COLLECTOR_DB_HOST: collector-db
+      COLLECTOR_DB_PORT: 5432
+      COLLECTOR_DB_USER: collector
+      COLLECTOR_DB_PASSWORD: collector
+      COLLECTOR_DB_DATABASE: collector-db
+    depends_on:
+      - collector-db
+
+  collector-db:
+    image: postgres:17
+    container_name: collector-db
+    hostname: collector-db
+    restart: unless-stopped
+    ports:
+      - "5434:5432"
+    logging:
+      options:
+        max-size: 10m
+    volumes:
+      - db:/var/lib/postgresql/data
+    environment:
+      POSTGRES_DB: collector-db
+      POSTGRES_USER: collector
+      POSTGRES_PASSWORD: collector
+    shm_size: 2gb
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+    command:
+      - postgres
+      - -c
+      - shared_buffers=1GB
+      - -c
+      - work_mem=32MB
+      - -c
+      - max_parallel_workers_per_gather=4
+      - -c
+      - max_parallel_workers=8
+
+volumes:
+  data:
+  db:
