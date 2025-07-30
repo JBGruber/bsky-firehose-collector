@@ -7,7 +7,7 @@ if (exists("con")) {
 con <- DBI::dbConnect(
   RPostgres::Postgres(),
   dbname = "collector-db",
-  host = "10.6.13.115",
+  host = "localhost",
   port = 5432,
   user = "collector",
   password = "collector"
