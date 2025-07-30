@@ -10,6 +10,7 @@ export type Post = {
   cid: string
   indexedAt: string
   createdAt: string
+  deletedAt?: string
   author: string
   text: string
   rootUri: string
@@ -17,7 +18,6 @@ export type Post = {
   linkUrl: string
   linkTitle: string
   linkDescription: string
-  priority?: number
   likes_count?: number
   repost_count?: number
   comments_count?: number

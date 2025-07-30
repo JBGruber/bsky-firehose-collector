@@ -88,7 +88,8 @@ export class FirehoseSubscription extends FirehoseSubscriptionBase {
 
     if (postsToDelete.length > 0) {
       await this.db
-        .deleteFrom('post')
+        .updateTable('post')
+        .set({ deletedAt: new Date().toISOString() })
         .where('uri', 'in', postsToDelete)
         .execute()
     }
