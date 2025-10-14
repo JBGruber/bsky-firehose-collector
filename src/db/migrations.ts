@@ -52,6 +52,48 @@ migrations['001'] = {
       .column('subjectUri')
       .execute()
 
+    await db.schema
+      .createIndex('engagement_subjectUri_type_index')
+      .on('engagement')
+      .columns(['subjectUri', 'type'])
+      .execute()
+
+    await db.schema
+      .createIndex('post_createdAt_index')
+      .on('post')
+      .column('createdAt')
+      .execute()
+
+    await db.schema
+      .createIndex('post_deletedAt_index')
+      .on('post')
+      .column('deletedAt')
+      .execute()
+
+    await db.schema
+      .createIndex('post_createdAt_deletedAt_index')
+      .on('post')
+      .columns(['createdAt', 'deletedAt'])
+      .execute()
+
+    await db.schema
+      .createIndex('post_author_index')
+      .on('post')
+      .column('author')
+      .execute()
+
+    await db.schema
+      .createIndex('post_indexedAt_index')
+      .on('post')
+      .column('indexedAt')
+      .execute()
+
+    await db.schema
+      .createIndex('post_rootUri_index')
+      .on('post')
+      .column('rootUri')
+      .execute()
+
   },
   async down(db: Kysely<unknown>) {
     await db.schema.dropTable('post').execute()
