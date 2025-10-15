@@ -8,3 +8,17 @@ docker compose up -d
 ```
 
 [get_data](scripts/get_data.R) contains a minimal example of how to query the data from `R`.
+
+## Build and upload
+
+``` bash
+docker-compose down && \
+  docker-compose build --no-cache && \
+  docker-compose up -d
+```
+
+Then push to dockerhub.
+
+``` bash
+docker image push jbgruber/bsky-firehose-collector:latest
+```
