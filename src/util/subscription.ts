@@ -10,6 +10,10 @@ import {
   OutputSchema as RepoEvent,
   isCommit,
 } from '../lexicon/types/com/atproto/sync/subscribeRepos'
+import {
+  OutputSchema as LabelEvent,
+  isLabels,
+} from '../lexicon/types/com/atproto/label/subscribeLabels'
 import { Database } from '../db'
 
 export abstract class FirehoseSubscriptionBase {
@@ -158,6 +162,67 @@ const isType = (obj: unknown, nsid: string) => {
     return true
   } catch (err) {
     return false
+  }
+}
+
+export abstract class LabelSubscriptionBase {
+  public sub: Subscription<LabelEvent>
+
+  constructor(public db: Database, public service: string) {
+    this.sub = new Subscription({
+      service: service,
+      method: ids.ComAtprotoLabelSubscribeLabels,
+      getParams: () => this.getCursor(),
+      validate: (value: unknown) => {
+        try {
+          return lexicons.assertValidXrpcMessage<LabelEvent>(
+            ids.ComAtprotoLabelSubscribeLabels,
+            value,
+          )
+        } catch (err) {
+          console.error('label subscription skipped invalid message', err)
+        }
+      },
+    })
+  }
+
+  abstract handleEvent(evt: LabelEvent): Promise<void>
+
+  async run(subscriptionReconnectDelay: number) {
+    try {
+      for await (const evt of this.sub) {
+        this.handleEvent(evt).catch((err) => {
+          console.error('label subscription could not handle message', err)
+        })
+        if (isLabels(evt) && evt.seq % 20 === 0) {
+          await this.updateCursor(evt.seq)
+        }
+      }
+    } catch (err) {
+      console.error('label subscription errored', err)
+      setTimeout(
+        () => this.run(subscriptionReconnectDelay),
+        subscriptionReconnectDelay,
+      )
+    }
+  }
+
+  async updateCursor(cursor: number) {
+    const bigintCursor = BigInt(cursor)
+    await this.db
+      .updateTable('sub_state')
+      .set({ cursor: bigintCursor })
+      .where('service', '=', this.service)
+      .execute()
+  }
+
+  async getCursor(): Promise<{ cursor?: number }> {
+    const res = await this.db
+      .selectFrom('sub_state')
+      .selectAll()
+      .where('service', '=', this.service)
+      .executeTakeFirst()
+    return res ? { cursor: Number(res.cursor) } : {}
   }
 }
 

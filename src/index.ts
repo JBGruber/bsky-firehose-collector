@@ -1,5 +1,6 @@
 import { createDb, migrateToLatest } from './db'
 import { FirehoseSubscription } from './subscription'
+import { LabelSubscription } from './labelSubscription'
 
 const run = async () => {
   const pgHost = process.env.COLLECTOR_DB_HOST || 'localhost'
@@ -17,15 +18,20 @@ const run = async () => {
   
   await migrateToLatest(db)
   
+  const reconnectDelay = parseInt(process.env.COLLECTOR_SUBSCRIPTION_RECONNECT_DELAY || '3000', 10)
+
   const firehose = new FirehoseSubscription(
-    db, 
+    db,
     process.env.COLLECTOR_SUBSCRIPTION_ENDPOINT || 'wss://bsky.network'
   )
-  
-  firehose.run(
-    parseInt(process.env.COLLECTOR_SUBSCRIPTION_RECONNECT_DELAY || '3000', 10)
+  firehose.run(reconnectDelay)
+
+  const labelSub = new LabelSubscription(
+    db,
+    process.env.COLLECTOR_LABEL_SUBSCRIPTION_ENDPOINT || 'wss://mod.bsky.app'
   )
-  
+  labelSub.run(reconnectDelay)
+
   console.log(`[${new Date().toISOString()}] - 🔥 Firehose collection started`)
 }
 

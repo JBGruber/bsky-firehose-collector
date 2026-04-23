@@ -100,3 +100,35 @@ migrations['001'] = {
     await db.schema.dropTable('sub_state').execute()
   },
 }
+
+migrations['002'] = {
+  async up(db: Kysely<unknown>) {
+    await db.schema
+      .createTable('label')
+      .addColumn('src', 'varchar', (col) => col.notNull())
+      .addColumn('uri', 'varchar', (col) => col.notNull())
+      .addColumn('cid', 'varchar', (col) => col.notNull())
+      .addColumn('val', 'varchar', (col) => col.notNull())
+      .addColumn('neg', 'boolean', (col) => col.notNull().defaultTo(false))
+      .addColumn('cts', 'varchar', (col) => col.notNull())
+      .addColumn('indexedAt', 'varchar', (col) => col.notNull())
+      .execute()
+
+    await db.schema
+      .createIndex('label_uri_index')
+      .on('label')
+      .column('uri')
+      .execute()
+
+    // unique constraint used by onConflict().doNothing() to deduplicate replayed events
+    await db.schema
+      .createIndex('label_src_uri_val_cts_unique')
+      .on('label')
+      .columns(['src', 'uri', 'val', 'cts'])
+      .unique()
+      .execute()
+  },
+  async down(db: Kysely<unknown>) {
+    await db.schema.dropTable('label').execute()
+  },
+}
