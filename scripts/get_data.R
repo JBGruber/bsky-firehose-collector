@@ -2,15 +2,16 @@ library(tidyverse)
 if (exists("con")) {
   DBI::dbDisconnect(con)
 }
+readRenviron(".env")
 
 # the dbname, password etc are set in docker-compose.yml
 con <- DBI::dbConnect(
   RPostgres::Postgres(),
   dbname = "collector-db",
-  host = "localhost",
+  host = Sys.getenv("db_host", unset = "localhost"),
   port = 5432,
   user = "collector",
-  password = "collector"
+  password = Sys.getenv("db_pw", unset = "collector")
 )
 
 # see which tables exist
@@ -32,6 +33,11 @@ tbl(con, "engagement") |>
   mutate(type = c("repost", "like")[type]) |>
   count(type)
 
+# No of deltetd posts
+tbl(con, "post") |>
+  filter(!is.na(deletedAt)) |>
+  count()
+
 # get deleted posts
 deleted_posts <- tbl(con, "post") |>
   filter(!is.na(deletedAt)) |>
@@ -40,9 +46,9 @@ deleted_posts <- tbl(con, "post") |>
 
 deletion_data <- tbl(con, "post") |>
   filter(!is.na(deletedAt)) |>
-  mutate(time_online = as_datetime(deletedAt) - as_datetime(indexedAt)) |>
-  select(indexedAt, deletedAt, time_online) |>
+  select(indexedAt, deletedAt) |>
   collect() |>
+  mutate(time_online = as_datetime(deletedAt) - as_datetime(indexedAt)) |>
   mutate(
     time_online = as.difftime(time_online, units = "secs"),
     time_online_int = as.integer(time_online),
@@ -75,15 +81,22 @@ deletion_data |>
   annotate(
     "text",
     x = c(60, 300, 600, 900),
-    y = max(counts) * 1.1, # Slightly above max
+    y = max(counts) * 1.2, # Slightly above max
     label = c("1 min", "5 min", "10 min", "15 min\nand over"),
     color = "white",
     hjust = 0.5,
     vjust = 1
   ) +
+  scale_y_continuous(limits = c(0, max(counts) * 1.2), labels = scales::comma) +
   labs(
     x = NULL,
     y = NULL,
-    title = "seconds posts were online before deletion"
+    title = "seconds posts were online before deletion",
+    caption = glue::glue("N = {scales::comma(nrow(deletion_data))}")
   ) +
   hrbrthemes::theme_ft_rc()
+
+
+deletion_data |>
+  ggplot(aes(time_online)) +
+  geom_histogram(bins = 30)
