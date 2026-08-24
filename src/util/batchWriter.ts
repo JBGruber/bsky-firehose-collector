@@ -1,7 +1,7 @@
 import { Transaction } from 'kysely'
-import { Database } from '../db'
-import { DatabaseSchema } from '../db/schema'
-import { logError, wait } from './common'
+import { Database } from '../db/index.js'
+import { DatabaseSchema } from '../db/schema.js'
+import { logError, wait } from './common.js'
 
 export type Trx = Transaction<DatabaseSchema>
 

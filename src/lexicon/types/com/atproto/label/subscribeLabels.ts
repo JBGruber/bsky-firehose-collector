@@ -2,12 +2,10 @@
  * GENERATED CODE - DO NOT MODIFY
  */
 import { ValidationResult, BlobRef } from '@atproto/lexicon'
-import { lexicons } from '../../../../lexicons'
-import { isObj, hasProp } from '../../../../util'
+import { lexicons } from '../../../../lexicons.js'
+import { isObj, hasProp } from '../../../../util.js'
 import { CID } from 'multiformats/cid'
-import { HandlerAuth, ErrorFrame } from '@atproto/xrpc-server'
-import { IncomingMessage } from 'http'
-import * as ComAtprotoLabelDefs from './defs'
+import * as ComAtprotoLabelDefs from './defs.js'
 
 export interface QueryParams {
   /** The last known event to backfill from. */
@@ -18,17 +16,6 @@ export type OutputSchema =
   | Labels
   | Info
   | { $type: string; [k: string]: unknown }
-export type HandlerError = ErrorFrame<'FutureCursor'>
-export type HandlerOutput = HandlerError | OutputSchema
-export type HandlerReqCtx<HA extends HandlerAuth = never> = {
-  auth: HA
-  params: QueryParams
-  req: IncomingMessage
-  signal: AbortSignal
-}
-export type Handler<HA extends HandlerAuth = never> = (
-  ctx: HandlerReqCtx<HA>,
-) => AsyncIterable<HandlerOutput>
 
 export interface Labels {
   seq: number

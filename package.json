@@ -2,27 +2,29 @@
   "name": "bsky-collector",
   "version": "1.0.0",
   "description": "BlueSky firehose data collector",
-  "main": "index.js",
+  "main": "dist/index.js",
   "scripts": {
-    "start": "ts-node src/index.ts",
-    "build": "tsc"
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "tsx src/index.ts"
   },
   "dependencies": {
-    "@atproto/lexicon": "^0.2.2",
-    "@atproto/repo": "^0.3.2",
-    "@atproto/xrpc-server": "^0.7.9",
+    "@atproto/lexicon": "^0.7.11",
+    "@atproto/repo": "^0.10.11",
+    "@atproto/xrpc-server": "^0.12.5",
     "kysely": "^0.27.4",
     "multiformats": "^9.9.0",
     "pg": "^8.13.3"
   },
   "devDependencies": {
     "@types/node": "^22.10.2",
-    "ts-node": "^10.9.1",
+    "tsx": "^4.23.12",
     "typescript": "^5.0.4"
   },
   "engines": {
     "node": ">= 22",
     "yarn": "1"
   },
-  "packageManager": "yarn@1.22.22+sha512.a6b2f7906b721bba3d67d4aff083df04dad64c399707841b7acf00f6b133b7ac24255f2652fa22ae3534329dc6180534e98d17432037ff6fd140556e2bb3137e"
+  "packageManager": "yarn@1.22.22+sha512.a6b2f7906b721bba3d67d4aff083df04dad64c399707841b7acf00f6b133b7ac24255f2652fa22ae3534329dc6180534e98d17432037ff6fd140556e2bb3137e",
+  "type": "module"
 }

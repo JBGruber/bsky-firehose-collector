@@ -1,8 +1,11 @@
-import { Pool } from 'pg'
+// pg is CommonJS and its exports are not statically analysable, so a named
+// ESM import of Pool resolves to undefined at runtime
+import pg from 'pg'
+const { Pool } = pg
 import { Kysely, Migrator, PostgresDialect } from 'kysely'
-import { DatabaseSchema } from './schema'
-import { migrationProvider } from './migrations'
-import { envInt, logError } from '../util/common'
+import { DatabaseSchema } from './schema.js'
+import { migrationProvider } from './migrations.js'
+import { envInt, logError } from '../util/common.js'
 
 export type DbOptions = {
   max?: number

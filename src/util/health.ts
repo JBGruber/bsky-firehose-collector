@@ -1,6 +1,6 @@
 import { createServer, Server } from 'http'
-import { StreamStats } from './subscription'
-import { log, logError } from './common'
+import { StreamStats } from './subscription.js'
+import { log, logError } from './common.js'
 
 export type HealthOptions = {
   port: number

@@ -1,13 +1,13 @@
 import {
   OutputSchema as LabelEvent,
   isLabels,
-} from './lexicon/types/com/atproto/label/subscribeLabels'
-import { ids } from './lexicon/lexicons'
-import { Database } from './db'
-import { Label } from './db/schema'
-import { BatchSpec } from './util/batchWriter'
-import { chunk } from './util/common'
-import { StreamSubscriptionBase } from './util/subscription'
+} from './lexicon/types/com/atproto/label/subscribeLabels.js'
+import { ids } from './lexicon/lexicons.js'
+import { Database } from './db/index.js'
+import { Label } from './db/schema.js'
+import { BatchSpec } from './util/batchWriter.js'
+import { chunk } from './util/common.js'
+import { StreamSubscriptionBase } from './util/subscription.js'
 
 export type LabelBuffer = {
   labels: Label[]

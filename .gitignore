@@ -144,3 +144,6 @@ db.sqlite-journal
 .Rhistory
 bsky-collector.Rproj
 *.csv
+
+# lexicon regeneration scratch (see scripts/regenerate-lexicons.js)
+.lexgen/

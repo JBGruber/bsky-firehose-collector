@@ -1,14 +1,14 @@
-import { Subscription, DisconnectError, CloseCode } from '@atproto/xrpc-server'
+import { Subscription } from '@atproto/xrpc-server'
 import { cborToLexRecord, readCar } from '@atproto/repo'
 import { BlobRef } from '@atproto/lexicon'
-import { ids, lexicons } from '../lexicon/lexicons'
-import { Record as PostRecord } from '../lexicon/types/app/bsky/feed/post'
-import { Record as RepostRecord } from '../lexicon/types/app/bsky/feed/repost'
-import { Record as LikeRecord } from '../lexicon/types/app/bsky/feed/like'
-import { Commit } from '../lexicon/types/com/atproto/sync/subscribeRepos'
-import { Database } from '../db'
-import { BatchSpec, BatchWriter, Filler, WriterOptions } from './batchWriter'
-import { backoffDelay, envInt, log, logError, wait } from './common'
+import { ids, lexicons } from '../lexicon/lexicons.js'
+import { Record as PostRecord } from '../lexicon/types/app/bsky/feed/post.js'
+import { Record as RepostRecord } from '../lexicon/types/app/bsky/feed/repost.js'
+import { Record as LikeRecord } from '../lexicon/types/app/bsky/feed/like.js'
+import { Commit } from '../lexicon/types/com/atproto/sync/subscribeRepos.js'
+import { Database } from '../db/index.js'
+import { BatchSpec, BatchWriter, Filler, WriterOptions } from './batchWriter.js'
+import { backoffDelay, envInt, log, logError, wait } from './common.js'
 
 export type StreamStats = {
   name: string
@@ -160,7 +160,7 @@ export abstract class StreamSubscriptionBase<Evt, Buf> {
   async stop(): Promise<void> {
     if (this.stopped) return
     this.stopped = true
-    this.ac.abort(new DisconnectError(CloseCode.Normal))
+    this.ac.abort()
     if (this.running) await this.running.catch(() => {})
     await this.writer.close()
     log(
@@ -288,28 +288,30 @@ export const isLike = (obj: unknown): obj is LikeRecord => {
 
 const isType = (obj: unknown, nsid: string) => {
   try {
-    lexicons.assertValidRecord(nsid, fixBlobRefs(obj))
+    lexicons.assertValidRecord(nsid, toBlobRefs(obj))
     return true
   } catch (err) {
     return false
   }
 }
 
-// @TODO right now record validation fails on BlobRefs
-// simply because multiple packages have their own copy
-// of the BlobRef class, causing instanceof checks to fail.
-// This is a temporary solution.
-const fixBlobRefs = (obj: unknown): unknown => {
+/**
+ * `cborToLexRecord` decodes blobs into plain lex-data objects
+ * (`{ $type: 'blob', ref, mimeType, size }`), but the lexicon validator still
+ * requires `BlobRef` instances, so every record carrying an image or video has
+ * to be converted before it will validate. Skipping this silently rejects about
+ * a third of all posts -- every one with media or a link-card thumbnail.
+ */
+const toBlobRefs = (obj: unknown): unknown => {
   if (Array.isArray(obj)) {
-    return obj.map(fixBlobRefs)
+    return obj.map(toBlobRefs)
   }
   if (obj && typeof obj === 'object') {
-    if (obj.constructor.name === 'BlobRef') {
-      const blob = obj as BlobRef
-      return new BlobRef(blob.ref, blob.mimeType, blob.size, blob.original)
-    }
+    if (obj instanceof BlobRef) return obj
+    const blob = BlobRef.asBlobRef(obj)
+    if (blob) return blob
     return Object.entries(obj).reduce((acc, [key, val]) => {
-      return Object.assign(acc, { [key]: fixBlobRefs(val) })
+      return Object.assign(acc, { [key]: toBlobRefs(val) })
     }, {} as Record<string, unknown>)
   }
   return obj

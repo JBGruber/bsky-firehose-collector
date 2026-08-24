@@ -14,12 +14,6 @@
  * Taken from @atproto/api 0.20.41 and pruned to that closure. The package is
  * not a dependency -- regenerating means installing it again for the duration.
  *
- * One deliberate divergence from upstream: string format `tid` is stripped, because
- * @atproto/lexicon 0.2.3 does not know it and refuses to load a document that
- * uses it. Those fields validate as plain strings here. Nothing is dropped
- * from the data as a result -- it only means one fewer shape check on a field
- * the collector does not read.
- *
  * To add a stream or record type: add its NSID here along with every def its
  * refs reach, or validation throws on an unresolvable ref at runtime.
  */
@@ -291,10 +285,12 @@ export const schemaDict = {
           },
           rev: {
             type: 'string',
+            format: 'tid',
             description: 'The rev of the emitted commit. Note that this information is also in the commit object included in blocks, unless this is a tooBig event.',
           },
           since: {
             type: 'string',
+            format: 'tid',
             description: 'The rev of the last emitted commit from this repo (if any).',
           },
           blocks: {

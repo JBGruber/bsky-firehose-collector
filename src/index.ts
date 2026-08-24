@@ -1,8 +1,8 @@
-import { createDb, migrateToLatest } from './db'
-import { FirehoseSubscription } from './subscription'
-import { LabelSubscription } from './labelSubscription'
-import { startHealthServer, startStatsLogger } from './util/health'
-import { envInt, log, logError } from './util/common'
+import { createDb, migrateToLatest } from './db/index.js'
+import { FirehoseSubscription } from './subscription.js'
+import { LabelSubscription } from './labelSubscription.js'
+import { startHealthServer, startStatsLogger } from './util/health.js'
+import { envInt, log, logError } from './util/common.js'
 
 const run = async () => {
   const pgHost = process.env.COLLECTOR_DB_HOST || 'localhost'

@@ -5,13 +5,13 @@ import {
   isCommit,
   isIdentity,
   isTombstone,
-} from './lexicon/types/com/atproto/sync/subscribeRepos'
-import { ids } from './lexicon/lexicons'
-import { Database } from './db'
-import { AccountEvent, Engagement, Media, Post } from './db/schema'
-import { BatchSpec, Trx } from './util/batchWriter'
-import { chunk } from './util/common'
-import { getOpsByType, StreamSubscriptionBase } from './util/subscription'
+} from './lexicon/types/com/atproto/sync/subscribeRepos.js'
+import { ids } from './lexicon/lexicons.js'
+import { Database } from './db/index.js'
+import { AccountEvent, Engagement, Media, Post } from './db/schema.js'
+import { BatchSpec, Trx } from './util/batchWriter.js'
+import { chunk } from './util/common.js'
+import { getOpsByType, StreamSubscriptionBase } from './util/subscription.js'
 
 // for saving embedded preview cards
 function isExternalEmbed(embed: any): embed is { external: { uri: string, title: string, description: string } } {
