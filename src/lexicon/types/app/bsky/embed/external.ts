@@ -5,6 +5,7 @@ import { ValidationResult, BlobRef } from '@atproto/lexicon'
 import { lexicons } from '../../../../lexicons'
 import { isObj, hasProp } from '../../../../util'
 import { CID } from 'multiformats/cid'
+import * as ComAtprotoRepoStrongRef from '../../../com/atproto/repo/strongRef'
 
 export interface Main {
   external: External
@@ -29,6 +30,8 @@ export interface External {
   title: string
   description: string
   thumb?: BlobRef
+  /** StrongRefs (uri+cid) of the Atmosphere records that backed this view. */
+  associatedRefs?: ComAtprotoRepoStrongRef.Main[]
   [k: string]: unknown
 }
 
@@ -42,41 +45,4 @@ export function isExternal(v: unknown): v is External {
 
 export function validateExternal(v: unknown): ValidationResult {
   return lexicons.validate('app.bsky.embed.external#external', v)
-}
-
-export interface View {
-  external: ViewExternal
-  [k: string]: unknown
-}
-
-export function isView(v: unknown): v is View {
-  return (
-    isObj(v) &&
-    hasProp(v, '$type') &&
-    v.$type === 'app.bsky.embed.external#view'
-  )
-}
-
-export function validateView(v: unknown): ValidationResult {
-  return lexicons.validate('app.bsky.embed.external#view', v)
-}
-
-export interface ViewExternal {
-  uri: string
-  title: string
-  description: string
-  thumb?: string
-  [k: string]: unknown
-}
-
-export function isViewExternal(v: unknown): v is ViewExternal {
-  return (
-    isObj(v) &&
-    hasProp(v, '$type') &&
-    v.$type === 'app.bsky.embed.external#viewExternal'
-  )
-}
-
-export function validateViewExternal(v: unknown): ValidationResult {
-  return lexicons.validate('app.bsky.embed.external#viewExternal', v)
 }

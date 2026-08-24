@@ -7,6 +7,8 @@ import { isObj, hasProp } from '../../../../util'
 import { CID } from 'multiformats/cid'
 import * as AppBskyRichtextFacet from '../richtext/facet'
 import * as AppBskyEmbedImages from '../embed/images'
+import * as AppBskyEmbedVideo from '../embed/video'
+import * as AppBskyEmbedGallery from '../embed/gallery'
 import * as AppBskyEmbedExternal from '../embed/external'
 import * as AppBskyEmbedRecord from '../embed/record'
 import * as AppBskyEmbedRecordWithMedia from '../embed/recordWithMedia'
@@ -21,6 +23,8 @@ export interface Record {
   reply?: ReplyRef
   embed?:
     | AppBskyEmbedImages.Main
+    | AppBskyEmbedVideo.Main
+    | AppBskyEmbedGallery.Main
     | AppBskyEmbedExternal.Main
     | AppBskyEmbedRecord.Main
     | AppBskyEmbedRecordWithMedia.Main

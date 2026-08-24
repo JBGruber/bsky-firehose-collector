@@ -177,3 +177,66 @@ migrations['003'] = {
       .execute()
   },
 }
+
+migrations['004'] = {
+  async up(db: Kysely<unknown>) {
+    // A3: only reply.root was stored, so direct replies to a post could not be
+    // counted. Existing rows get '' -- the same "absent" convention rootUri
+    // already uses -- and are not backfillable, since the records are gone.
+    await db.schema
+      .alterTable('post')
+      .addColumn('parentUri', 'varchar', (col) => col.notNull().defaultTo(''))
+      .execute()
+    await db.schema
+      .alterTable('post')
+      .addColumn('parentCid', 'varchar', (col) => col.notNull().defaultTo(''))
+      .execute()
+
+    // A2: account lifecycle events. The firehose has been emitting these all
+    // along; the collector discarded them because it only handled #commit and
+    // because the vendored lexicon predated #account and #identity.
+    await db.schema
+      .createTable('account_event')
+      .addColumn('did', 'varchar', (col) => col.notNull())
+      .addColumn('seq', 'bigint', (col) => col.notNull())
+      // 'account' | 'identity' | 'tombstone' -- which frame it came from
+      .addColumn('eventType', 'varchar', (col) => col.notNull())
+      // null for #identity, which says only that the identity changed
+      .addColumn('active', 'boolean')
+      // takendown | suspended | deactivated | deleted, per the relay
+      .addColumn('status', 'varchar')
+      .addColumn('time', 'timestamptz', (col) => col.notNull())
+      .addColumn('indexedAt', 'timestamptz', (col) => col.notNull())
+      // also deduplicates replayed events via onConflict().doNothing()
+      .addPrimaryKeyConstraint('account_event_pkey', ['did', 'seq'])
+      .execute()
+
+    // A4: metadata for embedded images and video. Deliberately not the blobs --
+    // see the note on Media in schema.ts. Cannot be reconstructed once a post is
+    // deleted, which is why it lands before the next long collection run.
+    await db.schema
+      .createTable('media')
+      .addColumn('postUri', 'varchar', (col) => col.notNull())
+      .addColumn('idx', 'integer', (col) => col.notNull())
+      // 'image' | 'video'
+      .addColumn('mediaType', 'varchar', (col) => col.notNull())
+      .addColumn('blobCid', 'varchar')
+      .addColumn('mimeType', 'varchar')
+      .addColumn('size', 'bigint')
+      .addColumn('alt', 'text')
+      .addColumn('aspectW', 'integer')
+      .addColumn('aspectH', 'integer')
+      .addPrimaryKeyConstraint('media_pkey', ['postUri', 'idx'])
+      .execute()
+
+    // No secondary indexes on either table on purpose: both are read through
+    // their primary key's leading column (account_event by did, media by
+    // postUri), so anything else would be the pure write cost 003 removed.
+  },
+  async down(db: Kysely<unknown>) {
+    await db.schema.dropTable('media').execute()
+    await db.schema.dropTable('account_event').execute()
+    await db.schema.alterTable('post').dropColumn('parentCid').execute()
+    await db.schema.alterTable('post').dropColumn('parentUri').execute()
+  },
+}
