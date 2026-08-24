@@ -8,7 +8,7 @@ import { Record as LikeRecord } from '../lexicon/types/app/bsky/feed/like'
 import { Commit } from '../lexicon/types/com/atproto/sync/subscribeRepos'
 import { Database } from '../db'
 import { BatchSpec, BatchWriter, Filler, WriterOptions } from './batchWriter'
-import { log, logError, wait } from './common'
+import { backoffDelay, envInt, log, logError, wait } from './common'
 
 export type StreamStats = {
   name: string
@@ -95,9 +95,17 @@ export abstract class StreamSubscriptionBase<Evt, Buf> {
   }
 
   private async loop(subscriptionReconnectDelay: number): Promise<void> {
+    const ceilingMs = envInt('COLLECTOR_RECONNECT_MAX_DELAY_MS', 300_000)
+    // how long a connection has to survive before it counts as evidence that
+    // the endpoint is healthy again
+    const stableMs = envInt('COLLECTOR_RECONNECT_STABLE_MS', 60_000)
+    let attempt = 0
+
     while (!this.stopped) {
+      let connectedAt: number | null = null
       try {
         for await (const evt of this.sub) {
+          if (connectedAt === null) connectedAt = Date.now()
           this.connected = true
           await this.handle(evt)
           if (this.stopped) break
@@ -116,7 +124,20 @@ export abstract class StreamSubscriptionBase<Evt, Buf> {
       }
       this.connected = false
       if (this.stopped) break
-      await wait(subscriptionReconnectDelay)
+
+      // Reset only after a connection that actually held. Resetting on the
+      // first frame instead would let a flapping endpoint -- connect, one
+      // frame, drop -- retry at the base delay forever.
+      if (connectedAt !== null && Date.now() - connectedAt >= stableMs) {
+        attempt = 0
+      }
+      attempt++
+
+      const delay = backoffDelay(attempt, subscriptionReconnectDelay, ceilingMs)
+      log(
+        `${this.name} subscription reconnecting in ${(delay / 1000).toFixed(1)}s (attempt ${attempt})`,
+      )
+      await wait(delay)
     }
   }
 

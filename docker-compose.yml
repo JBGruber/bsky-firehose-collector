@@ -15,7 +15,10 @@ services:
     environment:
       NODE_ENV: production
       COLLECTOR_SUBSCRIPTION_ENDPOINT: wss://bsky.network
+      # base reconnect delay; retries back off exponentially with jitter up to
+      # COLLECTOR_RECONNECT_MAX_DELAY_MS
       COLLECTOR_SUBSCRIPTION_RECONNECT_DELAY: 3000
+      COLLECTOR_RECONNECT_MAX_DELAY_MS: 300000
       # health endpoint + the lag ceiling above which it reports unhealthy
       COLLECTOR_PORT: 3000
       COLLECTOR_MAX_LAG_MS: 600000
@@ -27,7 +30,8 @@ services:
       COLLECTOR_DB_PASSWORD: collector
       COLLECTOR_DB_DATABASE: collector-db
     depends_on:
-      - collector-db
+      collector-db:
+        condition: service_healthy
     # NB: plain docker/compose does not restart an unhealthy container -- this
     # makes a wedged collector visible to `docker ps` and to any external
     # watchdog, it does not act on it by itself.
@@ -59,6 +63,12 @@ services:
       memlock:
         soft: -1
         hard: -1
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U collector -d collector-db"]
+      interval: 10s
+      timeout: 5s
+      start_period: 30s
+      retries: 10
     command:
       - postgres
       - -c
@@ -69,6 +79,27 @@ services:
       - max_parallel_workers_per_gather=4
       - -c
       - max_parallel_workers=8
+      # Write path. The default max_wal_size=1GB forces a checkpoint every few
+      # minutes under firehose load, and each one is a write stall.
+      - -c
+      - max_wal_size=16GB
+      - -c
+      - checkpoint_timeout=15min
+      - -c
+      - checkpoint_completion_target=0.9
+      - -c
+      - wal_compression=on
+      # Safe now that the cursor is committed in the same transaction as the
+      # rows: an unclean shutdown loses well under a second of firehose data,
+      # and the stream replays it from the last committed cursor.
+      - -c
+      - synchronous_commit=off
+      # Sustained inserts generate dead tuples faster than the default
+      # autovacuum pacing can keep up with.
+      - -c
+      - autovacuum_vacuum_cost_limit=2000
+      - -c
+      - autovacuum_naptime=15s
 
 volumes:
   data:

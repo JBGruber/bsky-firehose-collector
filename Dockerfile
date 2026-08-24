@@ -1,10 +1,13 @@
-FROM node:18-slim
+FROM node:22-slim
 
 WORKDIR /app
 
-# Install dependencies
-COPY . .
+# Manifests first: a source change then reuses the cached install layer instead
+# of reinstalling every dependency on every build.
+COPY package.json yarn.lock ./
 RUN yarn install --frozen-lockfile
+
+COPY . .
 
 # Set environment variables
 ENV NODE_ENV=production

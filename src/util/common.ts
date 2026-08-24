@@ -22,3 +22,19 @@ export const log = (msg: string, ...rest: unknown[]) => {
 export const logError = (msg: string, ...rest: unknown[]) => {
   console.error(`[${new Date().toISOString()}] - ${msg}`, ...rest)
 }
+
+/**
+ * Exponential backoff with equal jitter, capped at `ceilingMs`.
+ *
+ * The jitter matters as much as the backoff: both streams reconnect against
+ * Bluesky-operated endpoints, so an upstream outage would otherwise have every
+ * client retrying in lockstep at exactly the moment the endpoint comes back.
+ */
+export const backoffDelay = (
+  attempt: number,
+  baseMs: number,
+  ceilingMs: number,
+): number => {
+  const exp = Math.min(baseMs * 2 ** Math.max(0, attempt - 1), ceilingMs)
+  return Math.round(exp / 2 + Math.random() * (exp / 2))
+}

@@ -132,3 +132,48 @@ migrations['002'] = {
     await db.schema.dropTable('label').execute()
   },
 }
+
+migrations['003'] = {
+  async up(db: Kysely<unknown>) {
+    // Both are leading-column prefixes of a wider index, so the planner can
+    // always use the wider one instead. They cost a random B-tree write on
+    // every insert and buy nothing back.
+    await db.schema.dropIndex('post_createdAt_index').ifExists().execute()
+    await db.schema
+      .dropIndex('engagement_subject_uri_index')
+      .ifExists()
+      .execute()
+
+    // Never written by the collector: 0 in every row since 001, which invites
+    // anyone querying the table to read a real count into them. The A7 rollup
+    // reintroduces them once there is something to put in them.
+    await db.schema.alterTable('post').dropColumn('likes_count').execute()
+    await db.schema.alterTable('post').dropColumn('repost_count').execute()
+    await db.schema.alterTable('post').dropColumn('comments_count').execute()
+  },
+  async down(db: Kysely<unknown>) {
+    await db.schema
+      .alterTable('post')
+      .addColumn('likes_count', 'integer', (col) => col.defaultTo(0))
+      .execute()
+    await db.schema
+      .alterTable('post')
+      .addColumn('repost_count', 'integer', (col) => col.defaultTo(0))
+      .execute()
+    await db.schema
+      .alterTable('post')
+      .addColumn('comments_count', 'integer', (col) => col.defaultTo(0))
+      .execute()
+
+    await db.schema
+      .createIndex('post_createdAt_index')
+      .on('post')
+      .column('createdAt')
+      .execute()
+    await db.schema
+      .createIndex('engagement_subject_uri_index')
+      .on('engagement')
+      .column('subjectUri')
+      .execute()
+  },
+}

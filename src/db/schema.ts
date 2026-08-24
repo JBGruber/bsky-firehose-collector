@@ -18,9 +18,6 @@ export type Post = {
   linkUrl: string
   linkTitle: string
   linkDescription: string
-  likes_count?: number
-  repost_count?: number
-  comments_count?: number
 }
 
 export type Engagement = {

@@ -1,5 +1,11 @@
 .env
 node_modules/
+*.csv
 *.R
-subscribers.csv
-passwords.csv
+*.Rproj
+.Rhistory
+.Rproj.user/
+.git
+.gitignore
+*.md
+scripts/
