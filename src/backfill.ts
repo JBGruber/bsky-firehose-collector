@@ -76,23 +76,30 @@ const ensureMonths = async (
   }
 }
 
+/**
+ * Returns rows actually inserted, not rows attempted. The difference is the
+ * whole point of running this twice: overlap with what the relay replayed, or
+ * with a previous backfill, is deduplicated by the same `on conflict do nothing`
+ * the collector uses, and a report that counted attempts would claim to have
+ * done work it did not do.
+ */
 const insertRows = async (
   db: Database,
   table: string,
   rows: unknown[],
-): Promise<number> => {
-  let written = 0
+): Promise<{ inserted: number; skipped: number }> => {
+  let inserted = 0
   for (const batch of chunk(rows, 500)) {
     // The table name comes from the file, so this is the one place the schema
     // cannot be checked statically; KNOWN_TABLES is the check that replaces it.
-    await (db as any)
+    const res = await (db as any)
       .insertInto(table)
       .values(batch)
       .onConflict((oc: any) => oc.doNothing())
-      .execute()
-    written += batch.length
+      .executeTakeFirst()
+    inserted += Number(res?.numInsertedOrUpdatedRows ?? 0)
   }
-  return written
+  return { inserted, skipped: rows.length - inserted }
 }
 
 const backfillFile = async (
@@ -101,6 +108,7 @@ const backfillFile = async (
   opts: { dryRun: boolean; keep: boolean },
 ): Promise<Counts> => {
   const counts: Counts = {}
+  const skipped: Counts = {}
   const months = new Set<string>()
   let lines = 0
   let bad = 0
@@ -133,18 +141,23 @@ const backfillFile = async (
         continue
       }
       await ensureMonths(db, table, rows, months)
-      counts[table] = (counts[table] ?? 0) + (await insertRows(db, table, rows))
+      const res = await insertRows(db, table, rows)
+      counts[table] = (counts[table] ?? 0) + res.inserted
+      skipped[table] = (skipped[table] ?? 0) + res.skipped
     }
   }
 
   const total = Object.values(counts).reduce((sum, n) => sum + n, 0)
+  const totalSkipped = Object.values(skipped).reduce((sum, n) => sum + n, 0)
   log(
-    `${path}: ${lines} batches, ${total} rows` +
+    `${path}: ${lines} batches, ${total} rows inserted` +
+      (totalSkipped > 0 ? `, ${totalSkipped} already present` : '') +
       (bad > 0 ? `, ${bad} unparseable line(s) skipped` : '') +
       (opts.dryRun ? ' (dry run, nothing written)' : ''),
   )
-  for (const [table, n] of Object.entries(counts).sort()) {
-    log(`  ${table}: ${n}`)
+  for (const table of Object.keys({ ...counts, ...skipped }).sort()) {
+    const dup = skipped[table] ?? 0
+    log(`  ${table}: ${counts[table] ?? 0}${dup > 0 ? ` (+${dup} already present)` : ''}`)
   }
 
   if (!opts.dryRun && !opts.keep) {
@@ -196,7 +209,7 @@ const run = async () => {
   }
 
   const total = Object.values(totals).reduce((sum, n) => sum + n, 0)
-  log(`backfill complete: ${total} rows from ${files.length} file(s)`)
+  log(`backfill complete: ${total} rows inserted from ${files.length} file(s)`)
 }
 
 run().catch((err) => {

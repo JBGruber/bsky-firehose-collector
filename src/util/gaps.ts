@@ -33,8 +33,15 @@ export type Gap = {
   endedAt: number | null
   detail: string | null
   streams: string[] | null
-  /** false when the row in the database does not yet match this object */
-  synced: boolean
+  /**
+   * Bumped on every change to the gap. `syncedRev` records which revision was
+   * last written, so a change made *while a write was in flight* is not lost
+   * when that write completes and reports success -- which is not a theoretical
+   * race: a gap opened at startup is reclassified to cursor_expired and closed
+   * within about three milliseconds, well inside one round trip to Postgres.
+   */
+  rev: number
+  syncedRev: number
 }
 
 export type GapOptions = {
@@ -79,6 +86,10 @@ export class GapRecorder {
     return this.pending.filter((gap) => gap.endedAt === null)
   }
 
+  private static synced(gap: Gap): boolean {
+    return gap.syncedRev === gap.rev
+  }
+
   openGap(reason: GapReason, startedAt: number, opts: GapOptions = {}): Gap {
     const gap: Gap = {
       id: null,
@@ -87,7 +98,8 @@ export class GapRecorder {
       endedAt: null,
       detail: opts.detail ?? null,
       streams: opts.streams ?? null,
-      synced: false,
+      rev: 1,
+      syncedRev: 0,
     }
     this.enqueue(gap)
     log(
@@ -102,7 +114,7 @@ export class GapRecorder {
     if (gap.endedAt !== null) return
     gap.endedAt = Math.max(endedAt, gap.startedAt)
     if (detail) gap.detail = gap.detail ? `${gap.detail}; ${detail}` : detail
-    gap.synced = false
+    gap.rev++
     log(
       `${this.service}: collection gap closed (${gap.reason}) after ` +
         `${((gap.endedAt - gap.startedAt) / 1000).toFixed(1)}s` +
@@ -121,7 +133,7 @@ export class GapRecorder {
     if (gap.reason === reason) return
     gap.reason = reason
     if (detail) gap.detail = gap.detail ? `${gap.detail}; ${detail}` : detail
-    gap.synced = false
+    gap.rev++
     logError(
       `${this.service}: collection gap reclassified as ${reason}` +
         (gap.detail ? ` -- ${gap.detail}` : ''),
@@ -170,7 +182,7 @@ export class GapRecorder {
   /** write everything that is not yet in the database, oldest first */
   async sync(): Promise<void> {
     while (this.syncing) await this.syncing
-    if (this.pending.every((gap) => gap.synced)) {
+    if (this.pending.every(GapRecorder.synced)) {
       this.prune()
       return
     }
@@ -189,7 +201,7 @@ export class GapRecorder {
       this.timer = null
     }
     await this.sync()
-    const unwritten = this.pending.filter((gap) => !gap.synced).length
+    const unwritten = this.pending.filter((gap) => !GapRecorder.synced(gap)).length
     if (unwritten > 0) {
       logError(
         `${this.service}: ${unwritten} collection gap(s) could not be written; ` +
@@ -208,7 +220,11 @@ export class GapRecorder {
 
   private async flush(): Promise<void> {
     for (const gap of this.pending) {
-      if (gap.synced) continue
+      if (GapRecorder.synced(gap)) continue
+      // read before the write, applied after it: anything that changes the gap
+      // while the round trip is in flight leaves rev ahead of this and gets
+      // picked up by the next pass instead of being marked clean
+      const rev = gap.rev
       try {
         if (gap.id === null) {
           const row = await this.db
@@ -245,7 +261,7 @@ export class GapRecorder {
             .where('id', '=', gap.id)
             .execute()
         }
-        gap.synced = true
+        gap.syncedRev = rev
       } catch (err) {
         // The database is the thing that is unavailable often enough for this
         // class to exist. Stop at the first failure so ordering is preserved
@@ -267,7 +283,7 @@ export class GapRecorder {
   /** closed and written gaps have nothing left to say; keep memory flat */
   private prune(): void {
     this.pending = this.pending.filter(
-      (gap) => !gap.synced || gap.endedAt === null,
+      (gap) => !GapRecorder.synced(gap) || gap.endedAt === null,
     )
   }
 }
