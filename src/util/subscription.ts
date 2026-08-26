@@ -193,6 +193,21 @@ export abstract class StreamSubscriptionBase<Evt, Buf> {
   }
 
   /**
+   * The stream's own clock: the event time it has reached, not the wall clock.
+   *
+   * Every bound in `collection_gap` has to be in this, because the hole a gap
+   * describes is a hole in `indexedAt`, and `indexedAt` comes from the event.
+   * The two agree to within a few seconds while the stream is current and
+   * diverge by exactly the lag when it is not -- which is precisely when gaps
+   * get written. A real run recorded a shed_reposts window as 04:08:13-04:11:13
+   * while the hole in `engagement` ran 04:01:45-04:11:09: an analyst joining the
+   * gap table against the data would have looked in almost the wrong window.
+   */
+  private get eventNow(): number {
+    return this.newestEventTime ?? Date.now()
+  }
+
+  /**
    * Open a gap for as long as batches are going to the spill file instead of to
    * Postgres. Kept separate from the ladder's own transitions: if lag is holding
    * the stream on rung 3 anyway, the ladder never changes rung when the database
@@ -202,14 +217,14 @@ export abstract class StreamSubscriptionBase<Evt, Buf> {
   private trackDbAvailability(): void {
     const down = this.writer.dbUnavailable
     if (down && !this.dbGap) {
-      this.dbGap = this.gaps.openGap('db_unavailable', Date.now(), {
+      this.dbGap = this.gaps.openGap('db_unavailable', this.eventNow, {
         detail: 'batches are being written to the spill file',
         streams: this.ladder?.streams ?? null,
       })
     } else if (!down && this.dbGap) {
       this.gaps.closeGap(
         this.dbGap,
-        Date.now(),
+        this.eventNow,
         `run \`node dist/backfill.js\` to reconcile ${this.writer.spilledRows} spilled rows`,
       )
       this.dbGap = null
@@ -362,13 +377,15 @@ export abstract class StreamSubscriptionBase<Evt, Buf> {
     lagMs: number
     streams: string[]
   }): void {
-    const now = Date.now()
+    // event time, not wall clock -- see eventNow. At the moment a rung changes
+    // the two are `lagMs` apart, which for a shed decision is minutes.
+    const at = this.eventNow
     if (this.degradedGap) {
-      this.gaps.closeGap(this.degradedGap, now)
+      this.gaps.closeGap(this.degradedGap, at)
       this.degradedGap = null
     }
     if (change.to === 'normal') return
-    this.degradedGap = this.gaps.openGap('degraded', now, {
+    this.degradedGap = this.gaps.openGap('degraded', at, {
       detail: `${change.to} (lag ${(change.lagMs / 1000).toFixed(1)}s)`,
       streams: change.streams,
     })
@@ -388,11 +405,11 @@ export abstract class StreamSubscriptionBase<Evt, Buf> {
     // The shutdown itself is the start of the next gap; the run that comes back
     // closes it from its own watermark, so nothing is opened here.
     if (this.degradedGap) {
-      this.gaps.closeGap(this.degradedGap, Date.now(), 'collector shut down')
+      this.gaps.closeGap(this.degradedGap, this.eventNow, 'collector shut down')
       this.degradedGap = null
     }
     if (this.dbGap) {
-      this.gaps.closeGap(this.dbGap, Date.now(), 'collector shut down')
+      this.gaps.closeGap(this.dbGap, this.eventNow, 'collector shut down')
       this.dbGap = null
     }
     if (this.resumeGap) {

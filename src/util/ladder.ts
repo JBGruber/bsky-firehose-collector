@@ -36,6 +36,10 @@ export type LadderOptions = {
   spillLagMs?: number
   /** how long lag must stay down before stepping back up one rung */
   recoverAfterMs?: number
+  /** how long to watch the trend before deciding to shed */
+  probeMs?: number
+  /** a backlog that will clear within this long is caught up, not shed */
+  catchUpWithinMs?: number
   onChange?: (change: LadderChange) => void
 }
 
@@ -64,6 +68,9 @@ const ALL_STREAMS = [
  */
 const RECOVER_MARGIN = 0.8
 
+/** at most one "catching up, not shedding" line per minute */
+const CATCH_UP_LOG_INTERVAL_MS = 60_000
+
 export class FallbackLadder {
   /** the rung lag alone justifies, 0-3 */
   private lagRung = 0
@@ -71,9 +78,15 @@ export class FallbackLadder {
   /** when lag first dropped below the current rung's re-entry threshold */
   private belowSince: number | null = null
   private lastLagMs = 0
+  /** start of the window in which the lag trend is being watched */
+  private probeSince: number | null = null
+  private probeLag = 0
+  private lastCatchUpLog = 0
 
   private readonly thresholds: [number, number, number]
   private readonly recoverAfterMs: number
+  private readonly probeMs: number
+  private readonly catchUpWithinMs: number
   private readonly onChange: (change: LadderChange) => void
 
   constructor(opts: LadderOptions = {}) {
@@ -83,6 +96,8 @@ export class FallbackLadder {
       opts.spillLagMs ?? 900_000,
     ]
     this.recoverAfterMs = opts.recoverAfterMs ?? 120_000
+    this.probeMs = opts.probeMs ?? 15_000
+    this.catchUpWithinMs = opts.catchUpWithinMs ?? 1_800_000
     this.onChange = opts.onChange ?? (() => {})
   }
 
@@ -148,12 +163,15 @@ export class FallbackLadder {
 
     const target = this.rungForLag(lagMs)
     if (target > this.lagRung) {
-      const from = this.lagName
-      this.lagRung = target
-      this.belowSince = null
-      this.announce(from)
+      if (this.shouldShed(lagMs, now)) {
+        const from = this.lagName
+        this.lagRung = target
+        this.belowSince = null
+        this.announce(from)
+      }
       return
     }
+    this.probeSince = null
 
     if (this.lagRung === 0) {
       this.belowSince = null
@@ -176,6 +194,52 @@ export class FallbackLadder {
       this.belowSince = null
       this.announce(from)
     }
+  }
+
+  /**
+   * Being behind is not the same as being unable to keep up, and shedding is
+   * only the right answer to the second.
+   *
+   * Measured on a real restart: a 6m24s stop was fully covered by the cursor
+   * replay, but the replay put lag at 388 s, the ladder read that as overload,
+   * and ~121,000 likes and ~17,000 reposts were shed during the catch-up --
+   * data the relay still held and would have handed over. Every post came back;
+   * the engagement did not. Shedding traded away data that was not at risk.
+   *
+   * So the question is not "how far behind is it" but "will this clear". Watch
+   * the trend for `probeMs`, project the current rate of improvement forward,
+   * and shed only if the backlog would not clear within `catchUpWithinMs`. A
+   * stream that is genuinely overloaded shows lag flat or rising and sheds a few
+   * seconds later than it used to; a stream replaying a known gap sheds nothing.
+   * A very deep backlog -- days rather than minutes -- still sheds, because
+   * there the rate of improvement is what decides whether it ever catches up.
+   */
+  private shouldShed(lagMs: number, now: number): boolean {
+    if (this.probeSince === null) {
+      this.probeSince = now
+      this.probeLag = lagMs
+      return false
+    }
+    const elapsed = now - this.probeSince
+    if (elapsed < this.probeMs) return false
+
+    const dropPerMs = (this.probeLag - lagMs) / elapsed
+    // either way the next tick starts a fresh window, so a stream whose
+    // recovery stalls is re-evaluated rather than exempted indefinitely
+    this.probeSince = null
+    if (dropPerMs <= 0) return true
+
+    const clearInMs = lagMs / dropPerMs
+    if (clearInMs > this.catchUpWithinMs) return true
+
+    if (now - this.lastCatchUpLog >= CATCH_UP_LOG_INTERVAL_MS) {
+      this.lastCatchUpLog = now
+      log(
+        `fallback ladder: ${(lagMs / 1000).toFixed(0)}s behind but catching up ` +
+          `(clear in ~${(clearInMs / 60_000).toFixed(1)} min); shedding nothing`,
+      )
+    }
+    return false
   }
 
   private rungForLag(lagMs: number): number {
