@@ -1,5 +1,28 @@
-export const wait = (ms: number): Promise<void> =>
-  new Promise((resolve) => setTimeout(resolve, ms))
+/**
+ * Sleep, optionally cut short by an abort signal.
+ *
+ * The signal is what makes shutdown reliable. `loop()` sleeps here between
+ * reconnect attempts, and that delay reaches five minutes once an endpoint has
+ * been unreachable for a while. Without the signal, a SIGTERM arriving mid-sleep
+ * left `stop()` waiting for the timer, index.ts hit its 8 s hard-exit timer, and
+ * the buffered batch and its cursor were discarded -- precisely when a clean
+ * cursor is worth the most, since the endpoint being down is the reason there is
+ * ground to make up.
+ *
+ * Aborting resolves rather than rejects: every caller treats the wait as "enough
+ * time has passed", and the one that cares re-checks `stopped` immediately after.
+ */
+export const wait = (ms: number, signal?: AbortSignal): Promise<void> =>
+  new Promise((resolve) => {
+    if (signal?.aborted) return resolve()
+    const done = () => {
+      clearTimeout(timer)
+      signal?.removeEventListener('abort', done)
+      resolve()
+    }
+    const timer = setTimeout(done, ms)
+    signal?.addEventListener('abort', done, { once: true })
+  })
 
 export const chunk = <T>(items: T[], size: number): T[][] => {
   if (items.length <= size) return items.length > 0 ? [items] : []

@@ -1,26 +1,21 @@
-import { createDb, migrateToLatest } from './db/index.js'
+import {
+  connectionStringFromEnv,
+  createDb,
+  describeConnection,
+  migrateToLatest,
+} from './db/index.js'
 import { FirehoseSubscription } from './subscription.js'
 import { LabelSubscription } from './labelSubscription.js'
 import { startHealthServer, startStatsLogger } from './util/health.js'
 import { initPartitions, startPartitionMaintainer } from './util/partitions.js'
+import { pendingSpillFiles } from './util/spill.js'
 import { envInt, log, logError } from './util/common.js'
 
 const run = async () => {
-  const pgHost = process.env.COLLECTOR_DB_HOST || 'localhost'
-  const pgPort = parseInt(process.env.COLLECTOR_DB_PORT || '5432', 10)
-  const pgUser = process.env.COLLECTOR_DB_USER || 'collector'
-  const pgPassword = process.env.COLLECTOR_DB_PASSWORD || 'collector'
-  const pgDatabase = process.env.COLLECTOR_DB_DATABASE || 'collector-db'
-
-  const connectionString = process.env.COLLECTOR_POSTGRES_URL ||
-    `postgres://${pgUser}:${pgPassword}@${pgHost}:${pgPort}/${pgDatabase}`
+  const connectionString = connectionStringFromEnv()
 
   // the URL carries a password, so report only where it came from
-  log(
-    `Connecting to database: ${process.env.COLLECTOR_POSTGRES_URL
-      ? 'COLLECTOR_POSTGRES_URL'
-      : `${pgHost}:${pgPort}/${pgDatabase}`}`,
-  )
+  log(`Connecting to database: ${describeConnection()}`)
 
   await migrateToLatest(connectionString)
 
@@ -43,18 +38,47 @@ const run = async () => {
 
   const reconnectDelay = parseInt(process.env.COLLECTOR_SUBSCRIPTION_RECONNECT_DELAY || '3000', 10)
 
+  // Part D's bottom rung writes here. Already mounted as a volume in compose;
+  // this is the first thing that uses it.
+  const dataDir = process.env.COLLECTOR_DATA_DIR || '/app/data'
+  const unreconciled = await pendingSpillFiles(dataDir)
+  if (unreconciled.length > 0) {
+    logError(
+      `${unreconciled.length} spill file(s) in ${dataDir} hold rows that are ` +
+        `not in the database; run \`node dist/backfill.js\` to reconcile them:\n  ` +
+        unreconciled.join('\n  '),
+    )
+  }
+
   const firehose = new FirehoseSubscription(
     db,
-    process.env.COLLECTOR_SUBSCRIPTION_ENDPOINT || 'wss://bsky.network'
+    process.env.COLLECTOR_SUBSCRIPTION_ENDPOINT || 'wss://bsky.network',
+    {
+      dataDir,
+      ladder: {
+        shedLikesLagMs: envInt('COLLECTOR_SHED_LIKES_LAG_MS', 60_000),
+        shedRepostsLagMs: envInt('COLLECTOR_SHED_REPOSTS_LAG_MS', 300_000),
+        spillLagMs: envInt('COLLECTOR_SPILL_LAG_MS', 900_000),
+        recoverAfterMs: envInt('COLLECTOR_LADDER_RECOVER_MS', 120_000),
+      },
+    },
   )
 
   const labelSub = new LabelSubscription(
     db,
-    process.env.COLLECTOR_LABEL_SUBSCRIPTION_ENDPOINT || 'wss://mod.bsky.app'
+    process.env.COLLECTOR_LABEL_SUBSCRIPTION_ENDPOINT || 'wss://mod.bsky.app',
+    { dataDir },
   )
 
   const streams = [firehose, labelSub]
   const stats = () => streams.map((stream) => stream.stats())
+
+  // The disk fallback and the gap covering however long this stream was down.
+  // Before run(), so the gap starts at the watermark the last run committed
+  // rather than at whenever the first frame happens to arrive.
+  for (const stream of streams) {
+    await stream.init()
+  }
 
   const health = startHealthServer({
     port: envInt('COLLECTOR_PORT', 3000),

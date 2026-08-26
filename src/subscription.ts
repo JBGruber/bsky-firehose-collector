@@ -4,6 +4,7 @@ import {
   isAccount,
   isCommit,
   isIdentity,
+  isInfo,
   isTombstone,
 } from './lexicon/types/com/atproto/sync/subscribeRepos.js'
 import { ids } from './lexicon/lexicons.js'
@@ -11,6 +12,7 @@ import { Database } from './db/index.js'
 import { AccountEvent, Deletion, Engagement, Media, Post } from './db/schema.js'
 import { BatchSpec } from './util/batchWriter.js'
 import { chunk, eventIndexedAt, recordTimestamp } from './util/common.js'
+import { LadderOptions } from './util/ladder.js'
 import { getOpsByType, StreamSubscriptionBase } from './util/subscription.js'
 
 // for saving embedded preview cards
@@ -53,6 +55,17 @@ const repoBatchSpec: BatchSpec<RepoBuffer> = {
     buf.engagements.length +
     buf.engagementDeletions.length +
     buf.accountEvents.length,
+
+  // Table names for the disk fallback. Same rows, keyed by where they belong,
+  // so backfill needs no knowledge of this buffer's shape.
+  tables: (buf) => ({
+    post: buf.posts,
+    media: buf.media,
+    post_deletion: buf.postDeletions,
+    engagement: buf.engagements,
+    engagement_deletion: buf.engagementDeletions,
+    account_event: buf.accountEvents,
+  }),
 
   // Every table here is append-only, so the order within a batch no longer
   // matters: a post created and deleted inside the same batch is one row in
@@ -257,12 +270,28 @@ export class FirehoseSubscription extends StreamSubscriptionBase<
   RepoEvent,
   RepoBuffer
 > {
-  constructor(db: Database, service: string) {
+  constructor(
+    db: Database,
+    service: string,
+    opts: { dataDir?: string | null; ladder?: LadderOptions } = {},
+  ) {
     super(db, service, {
       name: 'repo',
       method: ids.ComAtprotoSyncSubscribeRepos,
       spec: repoBatchSpec,
+      // the only stream with a ladder: it is the one carrying the volume, and
+      // the only one with anything worth shedding
+      ladder: opts.ladder ?? {},
+      dataDir: opts.dataDir ?? null,
     })
+  }
+
+  // `#info` carries no seq, so it never reaches the writer -- but OutdatedCursor
+  // is how the relay says the resume point was outside its retention, which is
+  // the one signal that always means data is missing. See handleInfo().
+  protected info(evt: RepoEvent): { name: string; message?: string } | null {
+    if (!isInfo(evt)) return null
+    return { name: evt.name, message: evt.message }
   }
 
   // every frame type the collector stores carries `time`
@@ -287,7 +316,13 @@ export class FirehoseSubscription extends StreamSubscriptionBase<
       }
     }
 
-    const ops = await getOpsByType(evt)
+    // Part D: shedding happens before the records are decoded, not after they
+    // are built -- see WantedOps. At rung 1 the like records in this commit are
+    // never read out of the CAR at all.
+    const ops = await getOpsByType(evt, {
+      likes: this.ladder?.collectLikes ?? true,
+      reposts: this.ladder?.collectReposts ?? true,
+    })
 
     const postDeletions = ops.posts.deletes.map((del) => ({
       uri: del.uri,

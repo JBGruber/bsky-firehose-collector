@@ -670,3 +670,49 @@ migrations['005'] = {
     await sql`drop function if exists ensure_month_partition(text, timestamptz)`.execute(db)
   },
 }
+
+/**
+ * A5 -- the record of when collection was not running normally, and the
+ * watermark that lets a restart gap know where to start.
+ *
+ * Neither table is on the ingest path: `collection_gap` takes a row per
+ * reconnect and per ladder transition, which is a handful a day at worst, and
+ * `sub_state` already had one row per stream rewritten on every flush.
+ */
+migrations['006'] = {
+  async up(db: Kysely<unknown>) {
+    await db.schema
+      .createTable('collection_gap')
+      .addColumn('id', 'bigserial', (col) => col.primaryKey())
+      .addColumn('service', 'varchar', (col) => col.notNull())
+      .addColumn('startedAt', 'timestamptz', (col) => col.notNull())
+      // null while the gap is still open
+      .addColumn('endedAt', 'timestamptz')
+      // restart | disconnected | cursor_expired | degraded | db_unavailable
+      .addColumn('reason', 'varchar', (col) => col.notNull())
+      .addColumn('detail', 'text')
+      // which data categories were live during a degraded window
+      .addColumn('streams', sql`text[]`)
+      .execute()
+
+    // The one lookup that is not a full scan: on startup the collector adopts
+    // the gap a previous run left open rather than opening a second one beside
+    // it. Partial, because an open gap is the rare case by construction.
+    await sql`
+      create index "collection_gap_open_index"
+        on "collection_gap" ("service") where "endedAt" is null
+    `.execute(db)
+
+    // How far the corpus is complete, per stream. Nullable: a stream that has
+    // never committed a batch has no watermark, and the first run of a fresh
+    // database legitimately has nothing before it to have missed.
+    await db.schema
+      .alterTable('sub_state')
+      .addColumn('lastEventAt', 'timestamptz')
+      .execute()
+  },
+  async down(db: Kysely<unknown>) {
+    await db.schema.alterTable('sub_state').dropColumn('lastEventAt').execute()
+    await db.schema.dropTable('collection_gap').execute()
+  },
+}

@@ -147,3 +147,8 @@ bsky-collector.Rproj
 
 # lexicon regeneration scratch (see scripts/regenerate-lexicons.js)
 .lexgen/
+
+# Part D spill files: collected data awaiting `node dist/backfill.js`
+data/
+*.ndjson
+*.ndjson.done

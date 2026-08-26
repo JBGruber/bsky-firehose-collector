@@ -1,4 +1,4 @@
-import { ColumnType } from 'kysely'
+import { ColumnType, Generated } from 'kysely'
 
 /**
  * Postgres hands back `Date` for timestamptz and `string` for bigint, while the
@@ -17,6 +17,7 @@ export type DatabaseSchema = {
   engagement_deletion: Deletion
   label: Label
   account_event: AccountEvent
+  collection_gap: CollectionGap
   sub_state: SubState
 }
 
@@ -131,7 +132,45 @@ export type AccountEvent = {
   indexedAt: Timestamptz
 }
 
+/**
+ * A5 -- every interval in which collection was not running normally.
+ *
+ * Without this table an interruption leaves no trace, so a window with no
+ * deletions in it is indistinguishable from a window the collector was not
+ * watching. For a project whose dependent variable is a rate over time that is a
+ * validity problem rather than an operational one, and it is not recoverable
+ * after the fact.
+ *
+ * A row is opened when the stream stops receiving and closed by the timestamp of
+ * the first event that arrives once it does again -- both bounds taken from
+ * event time rather than the wall clock, so a restart whose cursor replay
+ * actually worked closes as a near-zero interval, and one whose cursor had
+ * expired closes as the real hole. The interval is the answer either way,
+ * without the writer having to know which happened.
+ */
+export type CollectionGap = {
+  id: Generated<string>
+  /** the endpoint, so repo and label gaps stay separable */
+  service: string
+  startedAt: Timestamptz
+  /** null while the gap is still open */
+  endedAt: TimestamptzOrNull
+  /** restart | disconnected | cursor_expired | degraded | db_unavailable */
+  reason: string
+  detail: string | null
+  /** which data categories were still being collected during a degraded window */
+  streams: string[] | null
+}
+
 export type SubState = {
   service: string
   cursor: bigint
+  /**
+   * Event timestamp of the newest event the committed cursor covers -- "the
+   * corpus is complete through here". Written in the same transaction as the
+   * cursor, so it cannot claim more than was durably stored. It is what lets a
+   * restart gap start at the moment collection actually stopped rather than at
+   * the moment the process happened to come back.
+   */
+  lastEventAt: TimestamptzOrNull
 }

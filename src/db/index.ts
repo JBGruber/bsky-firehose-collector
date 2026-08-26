@@ -13,6 +13,26 @@ export type DbOptions = {
   statementTimeoutMs?: number
 }
 
+/**
+ * The one place the connection details are assembled, so that the collector and
+ * `dist/backfill.js` cannot end up pointed at different databases.
+ */
+export const connectionStringFromEnv = (): string => {
+  if (process.env.COLLECTOR_POSTGRES_URL) return process.env.COLLECTOR_POSTGRES_URL
+  const host = process.env.COLLECTOR_DB_HOST || 'localhost'
+  const port = parseInt(process.env.COLLECTOR_DB_PORT || '5432', 10)
+  const user = process.env.COLLECTOR_DB_USER || 'collector'
+  const password = process.env.COLLECTOR_DB_PASSWORD || 'collector'
+  const database = process.env.COLLECTOR_DB_DATABASE || 'collector-db'
+  return `postgres://${user}:${password}@${host}:${port}/${database}`
+}
+
+/** where the connection came from -- the URL itself carries a password */
+export const describeConnection = (): string =>
+  process.env.COLLECTOR_POSTGRES_URL
+    ? 'COLLECTOR_POSTGRES_URL'
+    : `${process.env.COLLECTOR_DB_HOST || 'localhost'}:${process.env.COLLECTOR_DB_PORT || '5432'}/${process.env.COLLECTOR_DB_DATABASE || 'collector-db'}`
+
 export const createDb = (
   connectionString: string,
   opts: DbOptions = {},

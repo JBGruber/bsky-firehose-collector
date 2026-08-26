@@ -17,6 +17,7 @@ export type LabelBuffer = {
 const labelBatchSpec: BatchSpec<LabelBuffer> = {
   empty: () => ({ labels: [] }),
   size: (buf) => buf.labels.length,
+  tables: (buf) => ({ label: buf.labels }),
   write: async (trx, buf) => {
     for (const rows of chunk(buf.labels, 1000)) {
       await trx
@@ -32,7 +33,7 @@ export class LabelSubscription extends StreamSubscriptionBase<
   LabelEvent,
   LabelBuffer
 > {
-  constructor(db: Database, service: string) {
+  constructor(db: Database, service: string, opts: { dataDir?: string | null } = {}) {
     super(db, service, {
       name: 'label',
       method: ids.ComAtprotoLabelSubscribeLabels,
@@ -40,6 +41,12 @@ export class LabelSubscription extends StreamSubscriptionBase<
       // labels arrive far more sparsely than repo commits, so a lower
       // high-water mark keeps them from sitting in the buffer
       writer: { highWater: 200 },
+      // No ladder. There is nothing here worth shedding, and lag on a sparse
+      // stream is measured against whenever the last label happened to be
+      // issued, so it would escalate on quiet periods rather than on load. The
+      // disk fallback still applies: it is driven by write failures, not by the
+      // ladder.
+      dataDir: opts.dataDir ?? null,
     })
   }
 

@@ -1,6 +1,7 @@
 import { createServer, Server } from 'http'
 import { StreamStats } from './subscription.js'
 import { log, logError } from './common.js'
+import { dropStats, formatDrops } from './drops.js'
 
 export type HealthOptions = {
   port: number
@@ -33,13 +34,23 @@ const snapshot = (opts: HealthOptions) => {
       ? new Date(stats.lastFlushAt).toISOString()
       : null,
   }))
+  // A stream writing to the spill file is still collecting, but the database is
+  // not receiving it, and that needs to be visible to whatever is watching --
+  // restarting will not fix it, and it is the one state that leaves work to do
+  // afterwards.
   const healthy = streams.every(
-    (stream) => stream.connected && stream.effectiveLagMs <= opts.maxLagMs,
+    (stream) =>
+      stream.connected &&
+      stream.effectiveLagMs <= opts.maxLagMs &&
+      !stream.dbUnavailable,
   )
   return {
     status: healthy ? 'ok' : 'degraded',
     uptimeSeconds: Math.round((Date.now() - startedAt) / 1000),
     maxLagMs: opts.maxLagMs,
+    // A6: records that never made it into the corpus, by reason. Needed to
+    // describe the corpus whether or not the number turns out to be zero.
+    drops: dropStats(),
     streams,
     healthy,
   }
@@ -87,8 +98,18 @@ export const startStatsLogger = (
           `${perSec(stats.rowsWritten - prev.rows)} rows/s | ` +
           `buffer ${stats.bufferDepth} | cursor ${stats.committedSeq ?? 'none'} | ` +
           `reconnects ${stats.reconnects} | flush errors ${stats.flushErrors}` +
+          (stats.mode === 'normal' ? '' : ` | MODE ${stats.mode}`) +
+          (stats.spilledRows > 0 ? ` | spilled ${stats.spilledRows}` : '') +
+          (stats.dbUnavailable ? ' | DB UNAVAILABLE' : '') +
           (stats.connected ? '' : ' | DISCONNECTED'),
       )
+    }
+    // A6: one line, only when there is something to say. The totals are the
+    // point -- individual drops are logged once per distinct reason and then
+    // never again, so this is where the volume becomes visible.
+    const drops = dropStats()
+    if (drops.total > 0) {
+      log(`dropped ${drops.total} records: ${formatDrops()}`)
     }
   }, intervalMs)
   timer.unref()

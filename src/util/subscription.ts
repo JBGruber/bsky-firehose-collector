@@ -9,6 +9,10 @@ import { Commit } from '../lexicon/types/com/atproto/sync/subscribeRepos.js'
 import { Database } from '../db/index.js'
 import { BatchSpec, BatchWriter, Filler, WriterOptions } from './batchWriter.js'
 import { backoffDelay, envInt, log, logError, wait } from './common.js'
+import { dropReason, recordDrop } from './drops.js'
+import { Gap, GapRecorder } from './gaps.js'
+import { FallbackLadder, LadderName, LadderOptions } from './ladder.js'
+import { SpillWriter } from './spill.js'
 
 export type StreamStats = {
   name: string
@@ -24,6 +28,12 @@ export type StreamStats = {
   lastEventAt: number | null
   lastFlushAt: number | null
   committedSeq: number | null
+  /** current fallback-ladder rung; 'normal' when nothing is being shed */
+  mode: LadderName
+  /** rows written to the spill file rather than to Postgres */
+  spilledRows: number
+  dbUnavailable: boolean
+  openGaps: { reason: string; startedAt: string; detail: string | null }[]
 }
 
 export type StreamOptions<B> = {
@@ -31,16 +41,22 @@ export type StreamOptions<B> = {
   method: string
   spec: BatchSpec<B>
   writer?: WriterOptions
+  /** absent means this stream sheds nothing and never spills pre-emptively */
+  ladder?: LadderOptions
+  /** where the disk fallback writes; null disables it */
+  dataDir?: string | null
 }
 
 /**
  * Shared machinery for the repo and label streams: cursor handling, batched
- * writes with backpressure, lag measurement and graceful shutdown.
+ * writes with backpressure, lag measurement, gap recording, the fallback ladder
+ * and graceful shutdown.
  */
 export abstract class StreamSubscriptionBase<Evt, Buf> {
   public sub: Subscription<Evt>
   protected writer: BatchWriter<Buf>
   public readonly name: string
+  public readonly ladder: FallbackLadder | null
 
   private ac = new AbortController()
   private stopped = false
@@ -54,13 +70,34 @@ export abstract class StreamSubscriptionBase<Evt, Buf> {
   /** newest event timestamp seen on the current connection -- see handle() */
   private newestEventTime: number | null = null
 
+  private gaps: GapRecorder
+  /** the gap covering the interval since the stream last received anything */
+  private resumeGap: Gap | null = null
+  /** the gap covering the current degraded rung, if any */
+  private degradedGap: Gap | null = null
+  /** the gap covering the current stretch of unwritable database, if any */
+  private dbGap: Gap | null = null
+  private ladderTimer: NodeJS.Timeout | null = null
+  private readonly dataDir: string | null
+
   constructor(
     public db: Database,
     public service: string,
     opts: StreamOptions<Buf>,
   ) {
     this.name = opts.name
-    this.writer = new BatchWriter(db, service, opts.spec, opts.writer)
+    this.dataDir = opts.dataDir ?? null
+    this.gaps = new GapRecorder(db, service)
+    this.ladder = opts.ladder
+      ? new FallbackLadder({
+          ...opts.ladder,
+          onChange: (change) => this.onLadderChange(change),
+        })
+      : null
+    this.writer = new BatchWriter(db, service, opts.spec, {
+      ...opts.writer,
+      shouldSpill: () => this.ladder?.spilling ?? false,
+    })
     this.sub = new Subscription({
       service: service,
       method: opts.method,
@@ -79,7 +116,13 @@ export abstract class StreamSubscriptionBase<Evt, Buf> {
         try {
           return lexicons.assertValidXrpcMessage<Evt>(opts.method, value)
         } catch (err) {
-          logError(`${this.name} subscription skipped invalid message`, err)
+          // A6: counted, and logged only the first time each distinct reason is
+          // seen. A frame type the vendored lexicon does not know arrives on
+          // every frame, so logging each one would flood the log at exactly the
+          // moment it needs to stay readable; the periodic totals carry volume.
+          if (recordDrop(dropReason(`${this.name} frame`, err))) {
+            logError(`${this.name} subscription skipped invalid message`, err)
+          }
         }
       },
     })
@@ -91,9 +134,86 @@ export abstract class StreamSubscriptionBase<Evt, Buf> {
   /** event timestamp in ms, used for the lag metric */
   protected abstract eventTime(evt: Evt): number | null
 
+  /**
+   * Frames that carry no sequence number but do say something about coverage.
+   * Only `subscribeRepos` has any -- `#info` -- so the default is none.
+   */
+  protected info(_evt: Evt): { name: string; message?: string } | null {
+    return null
+  }
+
+  /**
+   * Everything that has to happen before the first frame: the disk fallback,
+   * and the gap covering however long this stream was not running.
+   */
+  async init(): Promise<void> {
+    if (this.dataDir) {
+      this.writer.spill = await SpillWriter.create(this.dataDir, this.service)
+    }
+
+    const state = await this.readSubState()
+    await this.gaps.closeOrphans(state?.lastEventAt ?? null)
+
+    if (!state) {
+      log(`${this.name} subscription starting at the live head (no cursor yet)`)
+      return
+    }
+    if (state.lastEventAt === null) {
+      log(
+        `${this.name} subscription has a cursor but no watermark, so the ` +
+          `interval it was down cannot be bounded; no gap recorded`,
+      )
+      return
+    }
+    // Closed by the first event that arrives. Both bounds are event times, so a
+    // cursor replay that worked closes this as a near-zero interval and one that
+    // did not closes it as the real hole -- without this code having to know
+    // which happened.
+    this.resumeGap = this.gaps.openGap('restart', state.lastEventAt, {
+      detail: `collector restarted; resuming from cursor ${state.cursor}`,
+    })
+  }
+
   run(subscriptionReconnectDelay: number): Promise<void> {
+    // Runs whether or not this stream has a ladder: the database being
+    // unwritable is a condition every stream can be in, and it is recorded the
+    // same way for all of them.
+    const interval = envInt('COLLECTOR_LADDER_INTERVAL_MS', 5_000)
+    this.ladderTimer = setInterval(() => {
+      // Pure lagMs rather than the health endpoint's effective lag: while the
+      // stream is disconnected the effective value grows on its own, which
+      // would escalate the ladder over an outage during which nothing is
+      // arriving to shed. On reconnect the real lag shows up within one tick.
+      this.ladder?.update(this.lagMs ?? 0, this.writer.dbUnavailable)
+      this.trackDbAvailability()
+    }, interval)
+    this.ladderTimer.unref()
     this.running = this.loop(subscriptionReconnectDelay)
     return this.running
+  }
+
+  /**
+   * Open a gap for as long as batches are going to the spill file instead of to
+   * Postgres. Kept separate from the ladder's own transitions: if lag is holding
+   * the stream on rung 3 anyway, the ladder never changes rung when the database
+   * fails or recovers, and this window would otherwise be invisible at one end
+   * and never closed at the other.
+   */
+  private trackDbAvailability(): void {
+    const down = this.writer.dbUnavailable
+    if (down && !this.dbGap) {
+      this.dbGap = this.gaps.openGap('db_unavailable', Date.now(), {
+        detail: 'batches are being written to the spill file',
+        streams: this.ladder?.streams ?? null,
+      })
+    } else if (!down && this.dbGap) {
+      this.gaps.closeGap(
+        this.dbGap,
+        Date.now(),
+        `run \`node dist/backfill.js\` to reconcile ${this.writer.spilledRows} spilled rows`,
+      )
+      this.dbGap = null
+    }
   }
 
   private async loop(subscriptionReconnectDelay: number): Promise<void> {
@@ -130,6 +250,11 @@ export abstract class StreamSubscriptionBase<Evt, Buf> {
       this.connected = false
       if (this.stopped) break
 
+      // Flush before opening the gap, so its start is the watermark the cursor
+      // actually reached rather than one up to a flush interval short of it.
+      await this.writer.flush()
+      this.openResumeGap('disconnected', 'stream disconnected')
+
       // Reset only after a connection that actually held. Resetting on the
       // first frame instead would let a flapping endpoint -- connect, one
       // frame, drop -- retry at the base delay forever.
@@ -142,13 +267,22 @@ export abstract class StreamSubscriptionBase<Evt, Buf> {
       log(
         `${this.name} subscription reconnecting in ${(delay / 1000).toFixed(1)}s (attempt ${attempt})`,
       )
-      await wait(delay)
+      // B13: abort-aware, so a SIGTERM arriving during a five-minute backoff
+      // does not outlast the shutdown timer and take the buffer with it.
+      await wait(delay, this.ac.signal)
+      if (this.stopped) break
     }
   }
 
   private async handle(evt: Evt): Promise<void> {
+    const info = this.info(evt)
+    if (info) {
+      this.handleInfo(info)
+      return
+    }
+
     const seq = seqOf(evt)
-    // frames without a sequence number (#info) carry no position to record
+    // frames without a sequence number carry no position to record
     if (seq === null) return
 
     this.eventsSeen++
@@ -174,9 +308,70 @@ export abstract class StreamSubscriptionBase<Evt, Buf> {
       this.lagMs = Date.now() - this.newestEventTime
     }
 
+    if (this.resumeGap) {
+      this.gaps.closeGap(this.resumeGap, time ?? Date.now())
+      this.resumeGap = null
+    }
+
     const fill = await this.prepare(evt)
     // still recorded even when there is nothing to store, so the cursor keeps up
-    await this.writer.add(fill ?? noop, seq)
+    await this.writer.add(fill ?? noop, seq, time)
+  }
+
+  /**
+   * `#info` is how the relay says the requested cursor was outside its
+   * retention and the stream was moved forward to whatever it still had. That
+   * is the one case in this file where data is definitely, unrecoverably
+   * missing, so it is reclassified rather than merely logged.
+   */
+  private handleInfo(info: { name: string; message?: string }): void {
+    const detail = `relay reported ${info.name}${info.message ? `: ${info.message}` : ''}`
+    if (info.name !== 'OutdatedCursor') {
+      log(`${this.name} subscription: ${detail}`)
+      return
+    }
+    logError(`${this.name} subscription: ${detail}`)
+    if (this.resumeGap) {
+      this.gaps.reclassify(this.resumeGap, 'cursor_expired', detail)
+    } else {
+      this.resumeGap = this.gaps.openGap(
+        'cursor_expired',
+        this.writer.committedEventAt ?? Date.now(),
+        { detail },
+      )
+    }
+  }
+
+  private openResumeGap(
+    reason: 'restart' | 'disconnected',
+    detail: string,
+  ): void {
+    if (this.resumeGap) return
+    const startedAt =
+      this.writer.committedEventAt ?? this.newestEventTime ?? Date.now()
+    this.resumeGap = this.gaps.openGap(reason, startedAt, { detail })
+  }
+
+  /**
+   * One `degraded` row per rung, so the `streams` array on each row is exactly
+   * what was being collected for that interval -- which is the sentence the
+   * methods section has to be able to write.
+   */
+  private onLadderChange(change: {
+    to: LadderName
+    lagMs: number
+    streams: string[]
+  }): void {
+    const now = Date.now()
+    if (this.degradedGap) {
+      this.gaps.closeGap(this.degradedGap, now)
+      this.degradedGap = null
+    }
+    if (change.to === 'normal') return
+    this.degradedGap = this.gaps.openGap('degraded', now, {
+      detail: `${change.to} (lag ${(change.lagMs / 1000).toFixed(1)}s)`,
+      streams: change.streams,
+    })
   }
 
   /** stop consuming, flush what is buffered, persist the cursor */
@@ -184,8 +379,27 @@ export abstract class StreamSubscriptionBase<Evt, Buf> {
     if (this.stopped) return
     this.stopped = true
     this.ac.abort()
+    if (this.ladderTimer) {
+      clearInterval(this.ladderTimer)
+      this.ladderTimer = null
+    }
     if (this.running) await this.running.catch(() => {})
     await this.writer.close()
+    // The shutdown itself is the start of the next gap; the run that comes back
+    // closes it from its own watermark, so nothing is opened here.
+    if (this.degradedGap) {
+      this.gaps.closeGap(this.degradedGap, Date.now(), 'collector shut down')
+      this.degradedGap = null
+    }
+    if (this.dbGap) {
+      this.gaps.closeGap(this.dbGap, Date.now(), 'collector shut down')
+      this.dbGap = null
+    }
+    if (this.resumeGap) {
+      this.gaps.closeGap(this.resumeGap, Date.now(), 'collector shut down')
+      this.resumeGap = null
+    }
+    await this.gaps.shutdown()
     log(
       `${this.name} subscription stopped at cursor ${this.writer.committedSeq ?? 'none'}`,
     )
@@ -205,20 +419,39 @@ export abstract class StreamSubscriptionBase<Evt, Buf> {
       lastEventAt: this.lastEventAt,
       lastFlushAt: this.writer.lastFlushAt,
       committedSeq: this.writer.committedSeq,
+      mode: this.ladder?.name ?? 'normal',
+      spilledRows: this.writer.spilledRows,
+      dbUnavailable: this.writer.dbUnavailable,
+      openGaps: this.gaps.open.map((gap) => ({
+        reason: gap.reason,
+        startedAt: new Date(gap.startedAt).toISOString(),
+        detail: gap.detail,
+      })),
     }
   }
 
-  async getCursor(): Promise<{ cursor?: number }> {
+  private async readSubState(): Promise<{
+    cursor: number
+    lastEventAt: number | null
+  } | null> {
     const res = await this.db
       .selectFrom('sub_state')
       .selectAll()
       .where('service', '=', this.service)
       .executeTakeFirst()
+    if (!res) return null
+    const lastEventAt = res.lastEventAt ? new Date(res.lastEventAt).getTime() : null
+    return {
+      cursor: Number(res.cursor),
+      lastEventAt: lastEventAt !== null && Number.isFinite(lastEventAt) ? lastEventAt : null,
+    }
+  }
 
-    if (!res) return {}
-    const cursor = Number(res.cursor)
-    log(`${this.name} subscription resuming from cursor ${cursor}`)
-    return { cursor }
+  async getCursor(): Promise<{ cursor?: number }> {
+    const state = await this.readSubState()
+    if (!state) return {}
+    log(`${this.name} subscription resuming from cursor ${state.cursor}`)
+    return { cursor: state.cursor }
   }
 }
 
@@ -240,7 +473,25 @@ const seqOf = (evt: unknown): number | null => {
   return null
 }
 
-export const getOpsByType = async (evt: Commit): Promise<OperationsByType> => {
+/**
+ * Which record collections are worth decoding out of a commit.
+ *
+ * Part D sheds by *not decoding*, not by dropping rows after the fact: the CAR
+ * lookup, the CBOR decode and the lexicon validation are where the CPU goes, and
+ * Node has one thread to spend. Filtering here is what makes shedding likes an
+ * actual throughput lever rather than a way to write fewer rows.
+ */
+export type WantedOps = {
+  likes?: boolean
+  reposts?: boolean
+}
+
+export const getOpsByType = async (
+  evt: Commit,
+  want: WantedOps = {},
+): Promise<OperationsByType> => {
+  const wantLikes = want.likes ?? true
+  const wantReposts = want.reposts ?? true
   const car = await readCar(evt.blocks)
   const opsByType: OperationsByType = {
     posts: { creates: [], updates: [], deletes: [] },
@@ -252,10 +503,21 @@ export const getOpsByType = async (evt: Commit): Promise<OperationsByType> => {
     const uri = `at://${evt.repo}/${op.path}`
     const [collection] = op.path.split('/')
 
+    if (collection === ids.AppBskyFeedLike && !wantLikes) continue
+    if (collection === ids.AppBskyFeedRepost && !wantReposts) continue
+
     if (op.action === 'create' || op.action === 'update') {
-      if (!op.cid) continue
+      if (!op.cid) {
+        if (isCollected(collection)) recordDrop(`${collection}: op without cid`)
+        continue
+      }
       const recordBytes = car.blocks.get(op.cid)
-      if (!recordBytes) continue
+      if (!recordBytes) {
+        if (isCollected(collection)) {
+          recordDrop(`${collection}: record block missing from the commit`)
+        }
+        continue
+      }
       const record = cborToLexRecord(recordBytes)
       const write = { uri, cid: op.cid.toString(), author: evt.repo }
       if (collection === ids.AppBskyFeedPost && isPost(record)) {
@@ -295,6 +557,12 @@ export const getOpsByType = async (evt: Commit): Promise<OperationsByType> => {
 
   return opsByType
 }
+
+/** the three collections the project stores; everything else is out of scope, not dropped */
+const isCollected = (collection: string): boolean =>
+  collection === ids.AppBskyFeedPost ||
+  collection === ids.AppBskyFeedRepost ||
+  collection === ids.AppBskyFeedLike
 
 type OperationsByType = {
   posts: Operations<PostRecord>
@@ -337,6 +605,12 @@ const isType = (obj: unknown, nsid: string) => {
     lexicons.assertValidRecord(nsid, toBlobRefs(obj))
     return true
   } catch (err) {
+    // A6: the collection has already been matched by the caller, so this is a
+    // record the project wanted and could not use -- an exclusion from the
+    // corpus, not a record of some other type passing by.
+    if (recordDrop(dropReason(nsid, err))) {
+      logError(`dropping invalid ${nsid} record`, err)
+    }
     return false
   }
 }

@@ -23,6 +23,17 @@ services:
       COLLECTOR_PORT: 3000
       COLLECTOR_MAX_LAG_MS: 600000
       COLLECTOR_STATS_INTERVAL_MS: 60000
+      # Part D -- the fallback ladder. Shed the least valuable stream first, and
+      # record every transition in collection_gap. Rung 3 writes batches to
+      # NDJSON under COLLECTOR_DATA_DIR instead of Postgres; reconcile them with
+      # `docker compose exec collector node dist/backfill.js`. A database that
+      # cannot be written to also lands on rung 3, but sheds nothing.
+      COLLECTOR_DATA_DIR: /app/data
+      COLLECTOR_SHED_LIKES_LAG_MS: 60000
+      COLLECTOR_SHED_REPOSTS_LAG_MS: 300000
+      COLLECTOR_SPILL_LAG_MS: 900000
+      # how long lag has to stay down before stepping back up one rung
+      COLLECTOR_LADDER_RECOVER_MS: 120000
       # Database connection details
       COLLECTOR_DB_HOST: collector-db
       COLLECTOR_DB_PORT: 5432

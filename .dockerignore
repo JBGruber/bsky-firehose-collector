@@ -11,3 +11,6 @@ node_modules/
 scripts/
 dist/
 .lexgen/
+
+# local verification scripts (see plan.md, "Verifying Milestone 6")
+/*-check.ts
