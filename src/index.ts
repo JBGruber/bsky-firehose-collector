@@ -2,6 +2,7 @@ import { createDb, migrateToLatest } from './db/index.js'
 import { FirehoseSubscription } from './subscription.js'
 import { LabelSubscription } from './labelSubscription.js'
 import { startHealthServer, startStatsLogger } from './util/health.js'
+import { initPartitions, startPartitionMaintainer } from './util/partitions.js'
 import { envInt, log, logError } from './util/common.js'
 
 const run = async () => {
@@ -24,6 +25,21 @@ const run = async () => {
   await migrateToLatest(connectionString)
 
   const db = createDb(connectionString)
+
+  // Monthly partitions have to exist before anything is written to them.
+  // Logged rather than fatal: the default partition catches rows in the
+  // meantime, and refusing to collect at all would be the worse failure.
+  const partitionMonthsAhead = envInt('COLLECTOR_PARTITION_MONTHS_AHEAD', 2)
+  try {
+    await initPartitions(db, partitionMonthsAhead)
+  } catch (err) {
+    logError('could not ensure monthly partitions at startup', err)
+  }
+  const partitionMaintainer = startPartitionMaintainer(
+    db,
+    envInt('COLLECTOR_PARTITION_INTERVAL_MS', 3_600_000),
+    partitionMonthsAhead,
+  )
 
   const reconnectDelay = parseInt(process.env.COLLECTOR_SUBSCRIPTION_RECONNECT_DELAY || '3000', 10)
 
@@ -75,6 +91,7 @@ const run = async () => {
     hardExit.unref()
 
     clearInterval(statsLogger)
+    clearInterval(partitionMaintainer)
     health.close()
     try {
       await Promise.all(streams.map((stream) => stream.stop()))

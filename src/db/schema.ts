@@ -3,27 +3,49 @@ import { ColumnType } from 'kysely'
 /**
  * Postgres hands back `Date` for timestamptz and `string` for bigint, while the
  * collector always inserts ISO strings and numbers. `ColumnType` records that
- * asymmetry rather than letting the select side quietly lie. The older columns
- * still store timestamps as varchar; B8 converts them in one pass.
+ * asymmetry rather than letting the select side quietly lie.
  */
 type Timestamptz = ColumnType<Date, string, string>
+type TimestamptzOrNull = ColumnType<Date | null, string | null, string | null>
 type Bigint = ColumnType<string, number, number>
 
 export type DatabaseSchema = {
   post: Post
+  post_deletion: Deletion
   media: Media
   engagement: Engagement
+  engagement_deletion: Deletion
   label: Label
   account_event: AccountEvent
   sub_state: SubState
 }
 
+/**
+ * Partitioned monthly on `indexedAt`, which is therefore part of the primary
+ * key `(uri, indexedAt)`. That only deduplicates a replayed event because
+ * `indexedAt` is derived from the event's own timestamp rather than from the
+ * wall clock -- see `eventIndexedAt` in util/common.ts.
+ *
+ * `uri` alone is therefore no longer unique, and deliberately so: this is a
+ * version table. An edited post keeps both versions, one row per version,
+ * ordered by `indexedAt` and distinguished by `isEdit`. The old single-column
+ * key silently discarded the second version. Anything that wants one row per
+ * post should take the earliest `indexedAt` per uri -- see scripts/get_data.R.
+ */
 export type Post = {
   uri: string
   cid: string
-  indexedAt: string
-  createdAt: string
-  deletedAt?: string
+  /** when the event happened, per the relay -- not when this process wrote it */
+  indexedAt: Timestamptz
+  /** null when the record's own createdAt was missing or implausible */
+  createdAt: TimestamptzOrNull
+  /**
+   * true when this row came from an `update` op -- the post was edited and this
+   * is the replacing version. False for the original, and also for the ~0.03%
+   * of edits some PDSes emit as a second `create`, which cannot be told apart
+   * from an original on the wire.
+   */
+  isEdit: boolean
   author: string
   text: string
   rootUri: string
@@ -36,15 +58,28 @@ export type Post = {
 }
 
 /**
+ * Deletions and engagement withdrawals, appended rather than written back over
+ * the original row. Both `post_deletion` and `engagement_deletion` use this
+ * shape. The primary key `(uri, deletedAt)` keeps the first deletion and turns
+ * a replayed event into a no-op conflict.
+ */
+export type Deletion = {
+  uri: string
+  deletedAt: Timestamptz
+}
+
+/**
  * Metadata for embedded images and video -- never the blobs themselves.
  * `postUri` references post(uri) by convention only: no foreign key, because a
- * per-row constraint check on the ingest path is exactly the kind of write cost
- * B8 exists to remove, and because partitioning post would break it anyway.
+ * per-row constraint check on the ingest path is the kind of write cost this
+ * schema exists to avoid, and because a partitioned parent cannot carry one.
+ * `indexedAt` is copied from the parent post to serve as the partition key.
  */
 export type Media = {
   postUri: string
   /** position within the embed; a post has at most one embed, so this is unique per post */
   idx: number
+  indexedAt: Timestamptz
   mediaType: 'image' | 'video'
   blobCid: string | null
   mimeType: string | null
@@ -60,9 +95,10 @@ export type Engagement = {
   cid: string
   subjectUri: string
   subjectCid: string
+  /** 1 = repost, 2 = like */
   type: number
-  indexedAt: string
-  createdAt: string
+  indexedAt: Timestamptz
+  createdAt: TimestamptzOrNull
   author: string
 }
 
@@ -72,8 +108,8 @@ export type Label = {
   cid: string
   val: string
   neg: boolean
-  cts: string
-  indexedAt: string
+  cts: Timestamptz
+  indexedAt: Timestamptz
 }
 
 /**
@@ -81,6 +117,9 @@ export type Label = {
  * deleted this post" from "every post by this account disappeared at once
  * because the account was suspended, taken down or deleted" -- without it the
  * second case reads as a burst of ordinary user deletions.
+ *
+ * Not partitioned: a few tens of thousands of rows a day, against millions for
+ * post and engagement, so its indexes are never the constraint.
  */
 export type AccountEvent = {
   did: string

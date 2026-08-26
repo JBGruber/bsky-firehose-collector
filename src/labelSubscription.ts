@@ -1,3 +1,4 @@
+import { Insertable } from 'kysely'
 import {
   OutputSchema as LabelEvent,
   isLabels,
@@ -6,11 +7,11 @@ import { ids } from './lexicon/lexicons.js'
 import { Database } from './db/index.js'
 import { Label } from './db/schema.js'
 import { BatchSpec } from './util/batchWriter.js'
-import { chunk } from './util/common.js'
+import { chunk, recordTimestamp } from './util/common.js'
 import { StreamSubscriptionBase } from './util/subscription.js'
 
 export type LabelBuffer = {
-  labels: Label[]
+  labels: Insertable<Label>[]
 }
 
 const labelBatchSpec: BatchSpec<LabelBuffer> = {
@@ -57,6 +58,9 @@ export class LabelSubscription extends StreamSubscriptionBase<
   protected async prepare(evt: LabelEvent) {
     if (!isLabels(evt)) return null
 
+    // Wall clock rather than an event timestamp: the label frame carries no
+    // `time` of its own, and `label` is not partitioned, so nothing depends on
+    // this value being reproducible across a replay.
     const indexedAt = new Date().toISOString()
     const labels = evt.labels.map((label) => ({
       src: label.src,
@@ -64,7 +68,10 @@ export class LabelSubscription extends StreamSubscriptionBase<
       cid: label.cid ?? '',
       val: label.val,
       neg: label.neg ?? false,
-      cts: label.cts,
+      // `cts` is part of the unique key that deduplicates replayed labels, so
+      // it cannot be null; the lexicon validates it as a datetime, and the
+      // fallback only exists so an unparseable one cannot fail the batch.
+      cts: recordTimestamp(label.cts) ?? indexedAt,
       indexedAt,
     }))
 

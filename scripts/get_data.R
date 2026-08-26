@@ -33,24 +33,42 @@ tbl(con, "engagement") |>
   mutate(type = c("repost", "like")[type]) |>
   count(type)
 
-# No of deltetd posts
-tbl(con, "post") |>
-  filter(!is.na(deletedAt)) |>
+# engagement that was later withdrawn -- un-likes and un-reposts are kept now
+# instead of being deleted outright
+tbl(con, "engagement_deletion") |>
   count()
+
+# Deletions live in their own append-only table now, rather than as a deletedAt
+# column written back over the post row. Timestamps are timestamptz, so they
+# arrive as POSIXct and need no parsing.
+tbl(con, "post_deletion") |>
+  count()
+
+# A post that was edited can appear more than once, keyed (uri, indexedAt); the
+# first version is the one to keep. Deduplicated after collect() because the
+# join already narrows to deleted posts.
+first_version <- function(d) {
+  d |>
+    arrange(uri, indexedAt) |>
+    distinct(uri, .keep_all = TRUE)
+}
 
 # get deleted posts
 deleted_posts <- tbl(con, "post") |>
-  filter(!is.na(deletedAt)) |>
-  collect()
-
+  inner_join(tbl(con, "post_deletion"), by = "uri") |>
+  collect() |>
+  first_version()
 
 deletion_data <- tbl(con, "post") |>
-  filter(!is.na(deletedAt)) |>
-  select(indexedAt, deletedAt) |>
+  select(uri, indexedAt) |>
+  inner_join(tbl(con, "post_deletion") |> select(uri, deletedAt), by = "uri") |>
   collect() |>
-  mutate(time_online = as_datetime(deletedAt) - as_datetime(indexedAt)) |>
+  first_version() |>
   mutate(
-    time_online = as.difftime(time_online, units = "secs"),
+    time_online = as.difftime(
+      as.numeric(difftime(deletedAt, indexedAt, units = "secs")),
+      units = "secs"
+    ),
     time_online_int = as.integer(time_online),
     time_online_int_clean = ifelse(time_online_int > 900, 901, time_online_int)
   )

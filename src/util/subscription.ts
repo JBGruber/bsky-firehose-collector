@@ -51,6 +51,8 @@ export abstract class StreamSubscriptionBase<Evt, Buf> {
   private reconnects = 0
   private lagMs: number | null = null
   private lastEventAt: number | null = null
+  /** newest event timestamp seen on the current connection -- see handle() */
+  private newestEventTime: number | null = null
 
   constructor(
     public db: Database,
@@ -105,7 +107,10 @@ export abstract class StreamSubscriptionBase<Evt, Buf> {
       let connectedAt: number | null = null
       try {
         for await (const evt of this.sub) {
-          if (connectedAt === null) connectedAt = Date.now()
+          if (connectedAt === null) {
+            connectedAt = Date.now()
+            this.newestEventTime = null
+          }
           this.connected = true
           await this.handle(evt)
           if (this.stopped) break
@@ -148,8 +153,26 @@ export abstract class StreamSubscriptionBase<Evt, Buf> {
 
     this.eventsSeen++
     this.lastEventAt = Date.now()
+    // Lag is measured against the newest event seen, not the last one. Frames
+    // are not delivered in timestamp order: a PDS coming back online replays
+    // days of history into an otherwise current stream, and 0.4% of frames in a
+    // live sample were over a minute old, the oldest by 8.8 days. Taking the
+    // last event's age let any one of those read as days of lag, which is the
+    // signal the health check and the Part D ladder are supposed to act on.
+    //
+    // The newest time is per-connection: after a reconnect the stream may be
+    // genuinely behind, and a value carried over from before would hide it.
     const time = this.eventTime(evt)
-    if (time !== null) this.lagMs = Date.now() - time
+    if (
+      time !== null &&
+      time <= Date.now() + MAX_CLOCK_AHEAD_MS &&
+      (this.newestEventTime === null || time > this.newestEventTime)
+    ) {
+      this.newestEventTime = time
+    }
+    if (this.newestEventTime !== null) {
+      this.lagMs = Date.now() - this.newestEventTime
+    }
 
     const fill = await this.prepare(evt)
     // still recorded even when there is nothing to store, so the cursor keeps up
@@ -199,6 +222,14 @@ export abstract class StreamSubscriptionBase<Evt, Buf> {
   }
 }
 
+/**
+ * An event timestamp further ahead than this is ignored when tracking the
+ * newest event: relay clocks run a few seconds ahead of local time in normal
+ * operation, but one badly wrong frame must not be able to peg lag at zero and
+ * mask a stream that is genuinely behind.
+ */
+const MAX_CLOCK_AHEAD_MS = 5 * 60 * 1000
+
 const noop = () => {}
 
 const seqOf = (evt: unknown): number | null => {
@@ -212,29 +243,42 @@ const seqOf = (evt: unknown): number | null => {
 export const getOpsByType = async (evt: Commit): Promise<OperationsByType> => {
   const car = await readCar(evt.blocks)
   const opsByType: OperationsByType = {
-    posts: { creates: [], deletes: [] },
-    reposts: { creates: [], deletes: [] },
-    likes: { creates: [], deletes: [] },
+    posts: { creates: [], updates: [], deletes: [] },
+    reposts: { creates: [], updates: [], deletes: [] },
+    likes: { creates: [], updates: [], deletes: [] },
   }
 
   for (const op of evt.ops) {
     const uri = `at://${evt.repo}/${op.path}`
     const [collection] = op.path.split('/')
 
-    if (op.action === 'update') continue // updates not supported yet
-
-    if (op.action === 'create') {
+    if (op.action === 'create' || op.action === 'update') {
       if (!op.cid) continue
       const recordBytes = car.blocks.get(op.cid)
       if (!recordBytes) continue
       const record = cborToLexRecord(recordBytes)
-      const create = { uri, cid: op.cid.toString(), author: evt.repo }
+      const write = { uri, cid: op.cid.toString(), author: evt.repo }
       if (collection === ids.AppBskyFeedPost && isPost(record)) {
-        opsByType.posts.creates.push({ record, ...create })
+        // An edit replaces the post's content: the previous text, embeds and
+        // link card stop being publicly visible exactly as a deletion would
+        // remove them, so it belongs to what the project measures. `post` is
+        // keyed (uri, indexedAt), which makes it a version table -- the edit is
+        // an additional row rather than an overwrite of the original.
+        const bucket =
+          op.action === 'update'
+            ? opsByType.posts.updates
+            : opsByType.posts.creates
+        bucket.push({ record, ...write })
+      } else if (op.action === 'update') {
+        // Likes and reposts carry nothing editable -- only a subject and a
+        // timestamp -- and an update op on one is vanishingly rare. Recording it
+        // would add a second engagement row for the same uri and inflate every
+        // count derived from the table, so it is skipped rather than stored.
+        continue
       } else if (collection === ids.AppBskyFeedRepost && isRepost(record)) {
-        opsByType.reposts.creates.push({ record, ...create })
+        opsByType.reposts.creates.push({ record, ...write })
       } else if (collection === ids.AppBskyFeedLike && isLike(record)) {
-        opsByType.likes.creates.push({ record, ...create })
+        opsByType.likes.creates.push({ record, ...write })
       }
     }
 
@@ -259,11 +303,13 @@ type OperationsByType = {
 }
 
 type Operations<T = Record<string, unknown>> = {
-  creates: CreateOp<T>[]
+  creates: WriteOp<T>[]
+  /** only ever populated for posts -- see getOpsByType */
+  updates: WriteOp<T>[]
   deletes: DeleteOp[]
 }
 
-type CreateOp<T> = {
+type WriteOp<T> = {
   uri: string
   cid: string
   author: string

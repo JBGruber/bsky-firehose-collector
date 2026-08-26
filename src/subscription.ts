@@ -1,4 +1,4 @@
-import { Insertable, sql } from 'kysely'
+import { Insertable } from 'kysely'
 import {
   OutputSchema as RepoEvent,
   isAccount,
@@ -8,9 +8,9 @@ import {
 } from './lexicon/types/com/atproto/sync/subscribeRepos.js'
 import { ids } from './lexicon/lexicons.js'
 import { Database } from './db/index.js'
-import { AccountEvent, Engagement, Media, Post } from './db/schema.js'
-import { BatchSpec, Trx } from './util/batchWriter.js'
-import { chunk } from './util/common.js'
+import { AccountEvent, Deletion, Engagement, Media, Post } from './db/schema.js'
+import { BatchSpec } from './util/batchWriter.js'
+import { chunk, eventIndexedAt, recordTimestamp } from './util/common.js'
 import { getOpsByType, StreamSubscriptionBase } from './util/subscription.js'
 
 // for saving embedded preview cards
@@ -30,9 +30,9 @@ function sanitizeForPostgres(text: string | null | undefined): string {
 export type RepoBuffer = {
   posts: Insertable<Post>[]
   media: Insertable<Media>[]
-  postDeletes: { uri: string; deletedAt: string }[]
+  postDeletions: Insertable<Deletion>[]
   engagements: Insertable<Engagement>[]
-  engagementDeletes: string[]
+  engagementDeletions: Insertable<Deletion>[]
   accountEvents: Insertable<AccountEvent>[]
 }
 
@@ -40,22 +40,23 @@ const repoBatchSpec: BatchSpec<RepoBuffer> = {
   empty: () => ({
     posts: [],
     media: [],
-    postDeletes: [],
+    postDeletions: [],
     engagements: [],
-    engagementDeletes: [],
+    engagementDeletions: [],
     accountEvents: [],
   }),
 
   size: (buf) =>
     buf.posts.length +
     buf.media.length +
-    buf.postDeletes.length +
+    buf.postDeletions.length +
     buf.engagements.length +
-    buf.engagementDeletes.length +
+    buf.engagementDeletions.length +
     buf.accountEvents.length,
 
-  // creates before deletes: a post created and deleted inside the same batch
-  // has to exist before it can be marked deleted
+  // Every table here is append-only, so the order within a batch no longer
+  // matters: a post created and deleted inside the same batch is one row in
+  // `post` and one in `post_deletion`, neither depending on the other.
   write: async (trx, buf) => {
     for (const rows of chunk(buf.posts, 500)) {
       await trx
@@ -85,33 +86,21 @@ const repoBatchSpec: BatchSpec<RepoBuffer> = {
         .onConflict((oc) => oc.doNothing())
         .execute()
     }
-    for (const rows of chunk(buf.postDeletes, 500)) {
-      await markPostsDeleted(trx, rows)
+    for (const rows of chunk(buf.postDeletions, 1000)) {
+      await trx
+        .insertInto('post_deletion')
+        .values(rows)
+        .onConflict((oc) => oc.doNothing())
+        .execute()
     }
-    for (const uris of chunk(buf.engagementDeletes, 1000)) {
-      await trx.deleteFrom('engagement').where('uri', 'in', uris).execute()
+    for (const rows of chunk(buf.engagementDeletions, 1000)) {
+      await trx
+        .insertInto('engagement_deletion')
+        .values(rows)
+        .onConflict((oc) => oc.doNothing())
+        .execute()
     }
   },
-}
-
-/**
- * One statement for the whole batch, keeping each post's own deletion time
- * rather than a single per-flush timestamp. The `deletedAt is null` guard keeps
- * the *first* deletion, so a replayed event cannot overwrite it -- `time_online`
- * in scripts/get_data.R is computed from it.
- */
-const markPostsDeleted = async (
-  trx: Trx,
-  rows: { uri: string; deletedAt: string }[],
-) => {
-  const values = sql.join(
-    rows.map((row) => sql`(${row.uri}::text, ${row.deletedAt}::text)`),
-  )
-  await sql`
-    update "post" set "deletedAt" = v."deletedAt"
-    from (values ${values}) as v("uri", "deletedAt")
-    where "post"."uri" = v."uri" and "post"."deletedAt" is null
-  `.execute(trx)
 }
 
 /**
@@ -150,7 +139,11 @@ const altText = (alt: unknown): string | null =>
  * firehose record already carries answers whether a post had media, how much,
  * and what the alt text said.
  */
-const extractMedia = (postUri: string, embed: any): Insertable<Media>[] => {
+const extractMedia = (
+  postUri: string,
+  indexedAt: string,
+  embed: any,
+): Insertable<Media>[] => {
   const inner = innerEmbed(embed)
   if (!inner || typeof inner !== 'object') return []
 
@@ -158,6 +151,7 @@ const extractMedia = (postUri: string, embed: any): Insertable<Media>[] => {
     return inner.images.map((image: any, idx: number) => ({
       postUri,
       idx,
+      indexedAt,
       mediaType: 'image' as const,
       ...blobFields(image?.image),
       alt: altText(image?.alt),
@@ -180,6 +174,7 @@ const extractMedia = (postUri: string, embed: any): Insertable<Media>[] => {
           postUri,
           // the item's position in the gallery, held even if a neighbour is skipped
           idx,
+          indexedAt,
           mediaType: (video ? 'video' : 'image') as 'image' | 'video',
           ...blobFields(blob),
           alt: altText(item?.alt),
@@ -194,6 +189,7 @@ const extractMedia = (postUri: string, embed: any): Insertable<Media>[] => {
       {
         postUri,
         idx: 0,
+        indexedAt,
         mediaType: 'video' as const,
         ...blobFields(inner.video),
         alt: altText(inner.alt),
@@ -278,7 +274,10 @@ export class FirehoseSubscription extends StreamSubscriptionBase<
   }
 
   protected async prepare(evt: RepoEvent) {
-    const indexedAt = new Date().toISOString()
+    // The event's own timestamp, not the wall clock: it is the partition key,
+    // and it has to be identical every time the same event is seen for the
+    // primary keys to keep deduplicating a cursor replay.
+    const indexedAt = eventIndexedAt((evt as { time?: unknown }).time)
 
     if (!isCommit(evt)) {
       const accountEvent = accountEventFrom(evt, indexedAt)
@@ -290,37 +289,47 @@ export class FirehoseSubscription extends StreamSubscriptionBase<
 
     const ops = await getOpsByType(evt)
 
-    const postDeletes = ops.posts.deletes.map((del) => ({
+    const postDeletions = ops.posts.deletes.map((del) => ({
       uri: del.uri,
       deletedAt: indexedAt,
     }))
     const media: Insertable<Media>[] = []
-    const posts = ops.posts.creates.map((create) => {
-      media.push(...extractMedia(create.uri, create.record.embed))
-      const external = innerEmbed(create.record.embed)
+    // Creates and edits are the same row shape and differ only in `isEdit`.
+    // Both are appended: `post` is keyed (uri, indexedAt), so an edit sits
+    // beside the version it replaced instead of overwriting it, and the text
+    // that stopped being publicly visible is still in the corpus.
+    const postWrite = (write: (typeof ops.posts.creates)[number], isEdit: boolean) => {
+      media.push(...extractMedia(write.uri, indexedAt, write.record.embed))
+      const external = innerEmbed(write.record.embed)
       const card = isExternalEmbed(external) ? external.external : null
       return {
-        uri: create.uri,
-        cid: create.cid,
+        uri: write.uri,
+        cid: write.cid,
         indexedAt,
-        createdAt: create.record.createdAt,
-        author: create.author,
-        text: sanitizeForPostgres(create.record.text),
-        rootUri: create.record.reply?.root?.uri || "",
-        rootCid: create.record.reply?.root?.cid || "",
-        parentUri: create.record.reply?.parent?.uri || "",
-        parentCid: create.record.reply?.parent?.cid || "",
+        createdAt: recordTimestamp(write.record.createdAt),
+        isEdit,
+        author: write.author,
+        text: sanitizeForPostgres(write.record.text),
+        rootUri: write.record.reply?.root?.uri || "",
+        rootCid: write.record.reply?.root?.cid || "",
+        parentUri: write.record.reply?.parent?.uri || "",
+        parentCid: write.record.reply?.parent?.cid || "",
         // extract preview card info if present
         linkUrl: card ? card.uri : "",
         linkTitle: sanitizeForPostgres(card ? card.title : ""),
         linkDescription: sanitizeForPostgres(card ? card.description : ""),
       }
-    })
+    }
+    const posts = ops.posts.creates
+      .map((create) => postWrite(create, false))
+      .concat(ops.posts.updates.map((update) => postWrite(update, true)))
 
-    // likes + reposts = engagement
-    const engagementDeletes = ops.reposts.deletes
-      .map((del) => del.uri)
-      .concat(ops.likes.deletes.map((del) => del.uri))
+    // likes + reposts = engagement. A withdrawal is an appended row rather than
+    // a DELETE: un-liking is itself an ephemerality event, and the old hard
+    // delete destroyed the only record that it had happened.
+    const engagementDeletions = ops.reposts.deletes
+      .concat(ops.likes.deletes)
+      .map((del) => ({ uri: del.uri, deletedAt: indexedAt }))
     const engagements = ops.reposts.creates
       .map((create) => {
         return {
@@ -330,7 +339,7 @@ export class FirehoseSubscription extends StreamSubscriptionBase<
           subjectCid: create.record.subject.cid,
           type: 1,
           indexedAt,
-          createdAt: create.record.createdAt,
+          createdAt: recordTimestamp(create.record.createdAt),
           author: create.author,
         }
       }).concat(
@@ -343,7 +352,7 @@ export class FirehoseSubscription extends StreamSubscriptionBase<
               subjectCid: create.record.subject.cid,
               type: 2,
               indexedAt,
-              createdAt: create.record.createdAt,
+              createdAt: recordTimestamp(create.record.createdAt),
               author: create.author,
             }
           })
@@ -351,9 +360,9 @@ export class FirehoseSubscription extends StreamSubscriptionBase<
 
     if (
       posts.length === 0 &&
-      postDeletes.length === 0 &&
+      postDeletions.length === 0 &&
       engagements.length === 0 &&
-      engagementDeletes.length === 0
+      engagementDeletions.length === 0
     ) {
       return null
     }
@@ -361,9 +370,9 @@ export class FirehoseSubscription extends StreamSubscriptionBase<
     return (buf: RepoBuffer) => {
       buf.posts.push(...posts)
       buf.media.push(...media)
-      buf.postDeletes.push(...postDeletes)
+      buf.postDeletions.push(...postDeletions)
       buf.engagements.push(...engagements)
-      buf.engagementDeletes.push(...engagementDeletes)
+      buf.engagementDeletions.push(...engagementDeletions)
     }
   }
 }
