@@ -1,6 +1,6 @@
 services:
   collector:
-    image: jbgruber/bsky-firehose-collector
+    image: jbgruber/bsky-firehose-collector:20260826
     build:
       context: .
       dockerfile: Dockerfile
@@ -38,7 +38,7 @@ services:
       COLLECTOR_DB_HOST: collector-db
       COLLECTOR_DB_PORT: 5432
       COLLECTOR_DB_USER: collector
-      COLLECTOR_DB_PASSWORD: collector
+      COLLECTOR_DB_PASSWORD: ${db_pw:-collector}
       COLLECTOR_DB_DATABASE: collector-db
     depends_on:
       collector-db:
@@ -68,7 +68,7 @@ services:
     environment:
       POSTGRES_DB: collector-db
       POSTGRES_USER: collector
-      POSTGRES_PASSWORD: collector
+      POSTGRES_PASSWORD: ${db_pw:-collector}
     shm_size: 2gb
     ulimits:
       memlock:
