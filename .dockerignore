@@ -1,6 +1,8 @@
 .env
 node_modules/
 *.csv
+*.zip
+*.tar.gz
 *.R
 *.Rproj
 .Rhistory
@@ -12,6 +14,6 @@ scripts/
 dist/
 .lexgen/
 
-# local verification scripts (see plan.md, "Verifying Milestone 6")
+dump-collector.sh
 /*-check.ts
 testenv.sh
