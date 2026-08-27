@@ -1,5 +1,17 @@
 .env
 node_modules/
+*.csv
 *.R
-subscribers.csv
-passwords.csv
+*.Rproj
+.Rhistory
+.Rproj.user/
+.git
+.gitignore
+*.md
+scripts/
+dist/
+.lexgen/
+
+# local verification scripts (see plan.md, "Verifying Milestone 6")
+/*-check.ts
+testenv.sh

@@ -1,0 +1,48 @@
+/**
+ * GENERATED CODE - DO NOT MODIFY
+ */
+import { ValidationResult, BlobRef } from '@atproto/lexicon'
+import { lexicons } from '../../../../lexicons.js'
+import { isObj, hasProp } from '../../../../util.js'
+import { CID } from 'multiformats/cid'
+import * as AppBskyEmbedDefs from './defs.js'
+
+export interface Main {
+  video: BlobRef
+  captions?: Caption[]
+  /** Alt text description of the video, for accessibility. */
+  alt?: string
+  aspectRatio?: AppBskyEmbedDefs.AspectRatio
+  /** A hint to the client about how to present the video. */
+  presentation?: 'default' | 'gif' | (string & {})
+  [k: string]: unknown
+}
+
+export function isMain(v: unknown): v is Main {
+  return (
+    isObj(v) &&
+    hasProp(v, '$type') &&
+    (v.$type === 'app.bsky.embed.video#main' ||
+      v.$type === 'app.bsky.embed.video')
+  )
+}
+
+export function validateMain(v: unknown): ValidationResult {
+  return lexicons.validate('app.bsky.embed.video#main', v)
+}
+
+export interface Caption {
+  lang: string
+  file: BlobRef
+  [k: string]: unknown
+}
+
+export function isCaption(v: unknown): v is Caption {
+  return (
+    isObj(v) && hasProp(v, '$type') && v.$type === 'app.bsky.embed.video#caption'
+  )
+}
+
+export function validateCaption(v: unknown): ValidationResult {
+  return lexicons.validate('app.bsky.embed.video#caption', v)
+}
