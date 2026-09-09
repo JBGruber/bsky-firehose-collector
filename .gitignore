@@ -152,3 +152,4 @@ bsky-collector.Rproj
 data/
 *.ndjson
 *.ndjson.done
+plan.md

@@ -1,6 +1,6 @@
 services:
   collector:
-    image: jbgruber/bsky-firehose-collector:20260826
+    image: jbgruber/bsky-firehose-collector:20260910
     build:
       context: .
       dockerfile: Dockerfile
