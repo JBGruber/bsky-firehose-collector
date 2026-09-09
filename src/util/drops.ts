@@ -72,3 +72,39 @@ export const formatDrops = (): string => {
   const parts = Object.entries(byReason).map(([reason, n]) => `${n}x ${reason}`)
   return parts.join(' | ')
 }
+
+/**
+ * Records that failed the lexicon gate on a field the collector does not store,
+ * and were admitted anyway rather than dropped.
+ *
+ * Kept separate from the drop counter because the two answer different
+ * questions: drops say what is missing from the corpus, recoveries say what is
+ * in it despite being malformed on the wire. Both belong in the methods
+ * section, and collapsing them would make the first number look worse and the
+ * second disappear.
+ */
+const recoveries = new Map<string, number>()
+let recovered = 0
+
+/** Count one admitted-despite-invalid record. Same first-sighting cue as `recordDrop`. */
+export const recordRecovery = (reason: string): boolean => {
+  recovered++
+  const key =
+    recoveries.has(reason) || recoveries.size < MAX_REASONS - 1 ? reason : OTHER
+  const seen = recoveries.get(key) ?? 0
+  recoveries.set(key, seen + 1)
+  return seen === 0 && key === reason
+}
+
+export const recoveryStats = (): DropStats => ({
+  total: recovered,
+  byReason: Object.fromEntries(
+    [...recoveries.entries()].sort((a, b) => b[1] - a[1]),
+  ),
+})
+
+/** one line, most frequent reason first, for the periodic stats log */
+export const formatRecoveries = (): string =>
+  Object.entries(recoveryStats().byReason)
+    .map(([reason, n]) => `${n}x ${reason}`)
+    .join(' | ')

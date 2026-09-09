@@ -5,7 +5,15 @@ import { tmpdir } from 'os'
 import { join } from 'path'
 import { wait } from './src/util/common.js'
 import { FallbackLadder } from './src/util/ladder.js'
-import { recordDrop, dropStats, dropReason } from './src/util/drops.js'
+import {
+  recordDrop,
+  dropStats,
+  dropReason,
+  recoveryStats,
+} from './src/util/drops.js'
+import { isPost, isLike } from './src/util/subscription.js'
+import { lexicons, ids } from './src/lexicon/lexicons.js'
+import { CID } from 'multiformats/cid'
 import { SpillWriter, pendingSpillFiles } from './src/util/spill.js'
 
 let failures = 0
@@ -195,6 +203,81 @@ const run = async () => {
   await check('dropReason flattens a validation error to one line', () => {
     const r = dropReason('app.bsky.feed.post', new Error('Record/createdAt\n  must be a\tstring'))
     assert.equal(r, 'app.bsky.feed.post: Record/createdAt must be a string')
+  })
+
+  console.log('A6 -- malformed records that are kept rather than dropped')
+  const validPost = (over: Record<string, unknown> = {}) => ({
+    $type: 'app.bsky.feed.post',
+    text: 'hello',
+    createdAt: '2026-09-09T04:49:04.007Z',
+    ...over,
+  })
+  await check('a well-formed post still validates', () => {
+    assert.equal(isPost(validPost()), true)
+  })
+  await check('keeps a post whose createdAt is not a valid atproto datetime', () => {
+    const before = recoveryStats().total
+    // the shape actually seen on the wire: no timezone designator at all
+    assert.equal(isPost(validPost({ createdAt: '2026-09-09 04:49:04' })), true)
+    assert.equal(isPost(validPost({ createdAt: 'yesterday' })), true)
+    assert.equal(isPost(validPost({ createdAt: '' })), true)
+    assert.equal(recoveryStats().total - before, 3)
+  })
+  await check('leaves the record untouched, so storage still sees the raw createdAt', () => {
+    const post = validPost({ createdAt: 'yesterday' })
+    isPost(post)
+    assert.equal(post.createdAt, 'yesterday', 'placeholder must not leak into the record')
+  })
+  await check('still drops a post that is malformed beyond createdAt', () => {
+    const before = dropStats().total
+    assert.equal(
+      isPost(validPost({ createdAt: 'yesterday', text: 'x'.repeat(301) })),
+      false,
+    )
+    assert.equal(dropStats().total - before, 1)
+  })
+  await check('still drops a like whose subject is missing a cid', () => {
+    const before = dropStats().total
+    assert.equal(
+      isLike({
+        $type: 'app.bsky.feed.like',
+        createdAt: 'yesterday',
+        subject: { uri: 'at://did:plc:abc/app.bsky.feed.post/xyz' },
+      }),
+      false,
+    )
+    assert.equal(dropStats().total - before, 1)
+  })
+  await check('a commit frame survives a since that is not a valid TID', () => {
+    // '8' is outside the base32-sortable alphabet a TID is built from; this is
+    // the exact value observed on the live firehose.
+    const frame = {
+      $type: 'com.atproto.sync.subscribeRepos#commit',
+      seq: 33459634299,
+      rebase: false,
+      tooBig: false,
+      repo: 'did:plc:kmvb6o6m3rfe4rbqhg3d56bc',
+      commit: CID.parse(
+        'bafyreidfayvfuwqa7qlnopdjiqrxzs6blmoeu4rujcjtnci5beludirz2a',
+      ),
+      rev: '3lu2puy3iwbuj',
+      since: '3lu2pshxtb8pk',
+      blocks: new Uint8Array(0),
+      ops: [],
+      blobs: [],
+      time: '2026-09-09T04:49:04.007Z',
+    }
+    assert.throws(
+      () => lexicons.assertValidXrpcMessage(ids.ComAtprotoSyncSubscribeRepos, frame),
+      /since must be a valid TID/,
+      'the raw frame is expected to fail validation',
+    )
+    // nulling the field is what the collector falls back to, and the lexicon
+    // declares `since` nullable, so this is the property that makes it safe
+    lexicons.assertValidXrpcMessage(ids.ComAtprotoSyncSubscribeRepos, {
+      ...frame,
+      since: null,
+    })
   })
 
   console.log('Part D -- spill file')

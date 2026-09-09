@@ -9,7 +9,7 @@ import { Commit } from '../lexicon/types/com/atproto/sync/subscribeRepos.js'
 import { Database } from '../db/index.js'
 import { BatchSpec, BatchWriter, Filler, WriterOptions } from './batchWriter.js'
 import { backoffDelay, envInt, log, logError, wait } from './common.js'
-import { dropReason, recordDrop } from './drops.js'
+import { dropReason, recordDrop, recordRecovery } from './drops.js'
 import { Gap, GapRecorder } from './gaps.js'
 import { FallbackLadder, LadderName, LadderOptions } from './ladder.js'
 import { SpillWriter } from './spill.js'
@@ -116,6 +116,17 @@ export abstract class StreamSubscriptionBase<Evt, Buf> {
         try {
           return lexicons.assertValidXrpcMessage<Evt>(opts.method, value)
         } catch (err) {
+          // Some PDSes emit a `since` outside the base32-sortable alphabet a
+          // TID is built from. `since` is nullable in the lexicon and read
+          // nowhere in the collector, so failing the frame over it discards
+          // every record in the commit because of a field nothing consumes.
+          const recovered = retryWithoutSince<Evt>(opts.method, value)
+          if (recovered !== undefined) {
+            if (recordRecovery(`${this.name} frame: Message/since is not a valid TID`)) {
+              log(`${this.name} admitting frames whose since is not a valid TID`)
+            }
+            return recovered
+          }
           // A6: counted, and logged only the first time each distinct reason is
           // seen. A frame type the vendored lexicon does not know arrives on
           // every frame, so logging each one would flood the log at exactly the
@@ -618,10 +629,26 @@ export const isLike = (obj: unknown): obj is LikeRecord => {
 }
 
 const isType = (obj: unknown, nsid: string) => {
+  // `converted` stays undefined if toBlobRefs itself threw -- an unparseable
+  // legacy blob cid does that -- in which case there is nothing to retry with.
+  let converted: unknown
   try {
-    lexicons.assertValidRecord(nsid, toBlobRefs(obj))
+    converted = toBlobRefs(obj)
+    lexicons.assertValidRecord(nsid, converted)
     return true
   } catch (err) {
+    // A record whose only defect is `createdAt` is still a record the project
+    // wants: `recordTimestamp` re-parses that field leniently and `post`.
+    // `createdAt` is nullable precisely so an unusable one is stored as unknown
+    // rather than costing the whole post (db/schema.ts). The reference
+    // implementation normalises these instead of rejecting them, so the posts
+    // are live on the network and excluding them would understate the corpus.
+    if (converted !== undefined && createdAtWasTheOnlyDefect(nsid, converted)) {
+      if (recordRecovery(`${nsid}: Record/createdAt is not a valid datetime`)) {
+        log(`admitting ${nsid} records whose createdAt is unusable`)
+      }
+      return true
+    }
     // A6: the collection has already been matched by the caller, so this is a
     // record the project wanted and could not use -- an exclusion from the
     // corpus, not a record of some other type passing by.
@@ -629,6 +656,56 @@ const isType = (obj: unknown, nsid: string) => {
       logError(`dropping invalid ${nsid} record`, err)
     }
     return false
+  }
+}
+
+/**
+ * A datetime the validator accepts, used only to ask whether `createdAt` was
+ * the sole reason a record failed. It is never stored: validation runs on a
+ * copy, and the storage path reads the record's own untouched field, so a
+ * timestamp that cannot be parsed still lands in the database as null.
+ */
+const PLACEHOLDER_CREATED_AT = '1970-01-01T00:00:00.000Z'
+
+const createdAtWasTheOnlyDefect = (nsid: string, converted: unknown): boolean => {
+  if (!converted || typeof converted !== 'object' || Array.isArray(converted)) {
+    return false
+  }
+  try {
+    lexicons.assertValidRecord(nsid, {
+      ...converted,
+      createdAt: PLACEHOLDER_CREATED_AT,
+    })
+    return true
+  } catch {
+    return false
+  }
+}
+
+/**
+ * Re-validate a frame with `since` nulled, returning the frame if that was the
+ * only thing wrong with it and undefined otherwise. Nulling is safe rather than
+ * lossy: the lexicon declares `since` nullable, and no part of the collector
+ * reads it -- the cursor is driven by `seq`.
+ */
+const retryWithoutSince = <Evt>(
+  method: string,
+  value: unknown,
+): Evt | undefined => {
+  if (
+    !value ||
+    typeof value !== 'object' ||
+    (value as { since?: unknown }).since == null
+  ) {
+    return undefined
+  }
+  try {
+    return lexicons.assertValidXrpcMessage<Evt>(method, {
+      ...value,
+      since: null,
+    })
+  } catch {
+    return undefined
   }
 }
 

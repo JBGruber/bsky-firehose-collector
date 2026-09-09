@@ -1,7 +1,12 @@
 import { createServer, Server } from 'http'
 import { StreamStats } from './subscription.js'
 import { log, logError } from './common.js'
-import { dropStats, formatDrops } from './drops.js'
+import {
+  dropStats,
+  formatDrops,
+  formatRecoveries,
+  recoveryStats,
+} from './drops.js'
 
 export type HealthOptions = {
   port: number
@@ -51,6 +56,9 @@ const snapshot = (opts: HealthOptions) => {
     // A6: records that never made it into the corpus, by reason. Needed to
     // describe the corpus whether or not the number turns out to be zero.
     drops: dropStats(),
+    // The other half of that description: records that failed validation on a
+    // field the collector does not store and were kept anyway.
+    recoveries: recoveryStats(),
     streams,
     healthy,
   }
@@ -110,6 +118,10 @@ export const startStatsLogger = (
     const drops = dropStats()
     if (drops.total > 0) {
       log(`dropped ${drops.total} records: ${formatDrops()}`)
+    }
+    const recoveries = recoveryStats()
+    if (recoveries.total > 0) {
+      log(`kept ${recoveries.total} malformed records: ${formatRecoveries()}`)
     }
   }, intervalMs)
   timer.unref()
